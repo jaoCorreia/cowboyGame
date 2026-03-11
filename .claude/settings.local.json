@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd \"C:/Users/joaoc/Documents/Code/JS-TS/Bun/cowboyGame\" && bun build src/game.ts --target browser 2>&1 | head -40)",
+      "Bash(cd \"C:/Users/joaoc/Documents/Code/JS-TS/Bun/cowboyGame\" && bun tsc --noEmit 2>&1 | head -30)",
+      "Bash(cd \"C:\\\\Users\\\\joaoc\\\\Documents\\\\Code\\\\JS-TS\\\\Bun\\\\cowboyGame\" && bunx tsc --noEmit --skipLibCheck 2>&1 | head -40)"
+    ]
+  }
+}

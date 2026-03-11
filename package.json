@@ -1,0 +1,21 @@
+{
+  "name": "cowboygame",
+  "module": "index.tsx",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "bun run index.ts",
+    "dev": "bun --watch run index.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.10"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "figlet": "^1.9.4",
+    "mongodb": "^7.1.0",
+    "sharp": "^0.34.5"
+  }
+}

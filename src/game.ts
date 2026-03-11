@@ -1,0 +1,2829 @@
+import {
+  TILE_W,
+  TILE_H,
+  MAP_COLS,
+  MAP_ROWS,
+  BASE_COL,
+  BASE_ROW,
+  BASE_SIZE,
+  BASE_SLOT_COLS,
+  BASE_SLOT_GAP,
+  COW_COUNT,
+  PLAYER_SPEED,
+  COW_WANDER_SPEED,
+  COW_FLEE_SPEED,
+  HERD_FOLLOW_SPEED,
+  HERD_SPACING,
+  CAPTURE_DIST,
+  LASSO_TIME_LIMIT,
+  LASSO_THROW_DURATION,
+  RARITY_COLORS,
+  RARITY_LABELS,
+  STAKE_RANGE,
+  STAKE_FLY_SPEED,
+  STAKE_PULL_SPEED,
+} from "./constants";
+
+/** Posição isométrica do slot de curral pelo índice do usuário (mesma fórmula do servidor). */
+function basedSlotPos(slot: number) {
+  return {
+    col: BASE_COL + 0.5 + (slot % BASE_SLOT_COLS) * BASE_SLOT_GAP,
+    row: BASE_ROW + 0.5 + Math.floor(slot / BASE_SLOT_COLS) * BASE_SLOT_GAP,
+  };
+}
+import { type Tile, type TileType, generateMap, isObstacle } from "./mapGen";
+import { type CowType, COW_TYPES, randomCowType } from "./cowTypes";
+import { sprites } from "./sprites";
+import { Network, type RemotePlayer, type ChatMessage } from "./network";
+import { type UserData, saveGameState } from "./auth";
+
+// ─── Types ─────────────────────────────────────────────────────────────────
+
+interface Player {
+  col: number;
+  row: number;
+  dirCol: number;
+  dirRow: number;
+  moving: boolean;
+}
+
+type CowState = "wandering" | "fleeing" | "lassoed" | "captured" | "based";
+
+interface Cow {
+  id: number;
+  col: number;
+  row: number;
+  state: CowState;
+  type: CowType;
+  wanderTimer: number;
+  wanderDirCol: number;
+  wanderDirRow: number;
+  herdIndex: number;
+  sparkTimer: number; // for legendary fx
+}
+
+interface Lasso {
+  active: boolean;
+  cow: Cow | null;
+  phase: "throwing" | "pulling" | "fail";
+  throwT: number;
+  clickCount: number;
+  timeLeft: number;
+  flashTimer: number;
+}
+
+interface Joystick {
+  active: boolean;
+  touchId: number;
+  startX: number;
+  startY: number;
+  dx: number;
+  dy: number;
+}
+
+// Stake (grappling hook across rivers)
+type StakePhase = "idle" | "aiming" | "flying" | "anchored" | "pulling";
+interface StakeData {
+  phase: StakePhase;
+  // where the stake is going / landed (grid coords)
+  targetCol: number;
+  targetRow: number;
+  // stake position during flight (interpolated)
+  flyCol: number;
+  flyRow: number;
+  // player origin when pull started
+  pullStartCol: number;
+  pullStartRow: number;
+  // 0-1 progress for pull animation
+  pullT: number;
+  // total distance for pull (tiles)
+  pullDist: number;
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+function dist(
+  a: { col: number; row: number },
+  b: { col: number; row: number },
+) {
+  return Math.sqrt((a.col - b.col) ** 2 + (a.row - b.row) ** 2);
+}
+
+function spawnCow(id: number, map: Tile[][]): Cow {
+  const minC = BASE_COL + BASE_SIZE + 4;
+  let col: number, row: number;
+  let tries = 0;
+  do {
+    col = minC + Math.random() * (MAP_COLS - minC - 4);
+    row = minC + Math.random() * (MAP_ROWS - minC - 4);
+    tries++;
+  } while (tries < 30 && isObstacle(map[Math.floor(row)]![Math.floor(col)]!));
+  return {
+    id,
+    col,
+    row,
+    state: "wandering",
+    type: randomCowType(),
+    wanderTimer: Math.random() * 3,
+    wanderDirCol: 0,
+    wanderDirRow: 0,
+    herdIndex: -1,
+    sparkTimer: 0,
+  };
+}
+
+// ─── Game ───────────────────────────────────────────────────────────────────
+
+export class Game {
+  private canvas: HTMLCanvasElement;
+  private ctx: CanvasRenderingContext2D;
+  private map: Tile[][];
+  private player: Player;
+  private cows: Cow[];
+  private basedCount = 0;
+  private lasso: Lasso;
+  private camX = 0;
+  private camY = 0;
+  private icons;
+  private keys = new Set<string>();
+  private joystick: Joystick = {
+    active: false,
+    touchId: -1,
+    startX: 0,
+    startY: 0,
+    dx: 0,
+    dy: 0,
+  };
+  private lastTime = 0;
+  private time = 0;
+  private isPreview = false;
+  private rafId = 0;
+
+  // Multiplayer
+  private network?: Network;
+  private remotePlayers = new Map<string, RemotePlayer>();
+  private remoteCowsInBase = new Map<
+    string,
+    { color: string; cows: Array<{ col: number; row: number }> }
+  >();
+  private myId = "";
+  private myColor = "#3a5a9f";
+  private myName = "Cowboy";
+  private myToken = "";
+  private netSendTimer = 0;
+  private saveTimer = 60;
+  private cowSpawnTimer = 45; // tempo até o próximo spawn de vaca
+  private nextCowId = COW_COUNT;
+
+  // Chat
+  private chatMessages: Array<ChatMessage & { time: number }> = [];
+  private chatOpen = false;
+  private chatInput?: HTMLInputElement;
+
+  // Cowboy Book
+  private bookOpen = false;
+  private statsMinimized = false;
+  private discovered = new Set<string>();
+  private capturedByType = new Map<string, number>();
+
+  // Stake (grappling hook)
+  private stake: StakeData = {
+    phase: "idle",
+    targetCol: 0,
+    targetRow: 0,
+    flyCol: 0,
+    flyRow: 0,
+    pullStartCol: 0,
+    pullStartRow: 0,
+    pullT: 0,
+    pullDist: 1,
+  };
+
+  constructor(canvas: HTMLCanvasElement, userData: UserData | null) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext("2d")!;
+    this.map = generateMap();
+    this.player = { col: 12, row: 12, dirCol: 1, dirRow: 0, moving: false };
+
+    if (!userData) {
+      // Modo preview: apenas renderiza o mundo sem rede nem UI de jogo
+      this.isPreview = true;
+    } else {
+      // Carrega dados persistidos do usuário
+      this.myToken = userData.token;
+      this.myColor = userData.color;
+      this.myName = userData.username;
+      // basedCows é a fonte de verdade — não usa basedCount da DB (pode estar desatualizado)
+      this.basedCount = userData.basedCows?.length ?? userData.basedCount;
+      this.discovered = new Set(userData.discovered);
+      this.capturedByType = new Map(Object.entries(userData.capturedByType));
+    }
+    this.cows = Array.from({ length: COW_COUNT }, (_, i) =>
+      spawnCow(i, this.map),
+    );
+    // Restaura vacas que estavam na base ao deslogar
+    if (userData?.basedCows && userData.basedCows.length > 0) {
+      userData.basedCows.forEach((typeId, i) => {
+        const cowType = COW_TYPES.find((t) => t.id === typeId) ?? COW_TYPES[0]!;
+        const pos = basedSlotPos(i);
+        this.cows.push({
+          id: COW_COUNT + i,
+          col: pos.col,
+          row: pos.row,
+          state: "based",
+          type: cowType,
+          wanderTimer: 0,
+          wanderDirCol: 0,
+          wanderDirRow: 0,
+          herdIndex: i,
+          sparkTimer: 0,
+        });
+      });
+      this.nextCowId = COW_COUNT + userData.basedCows.length;
+    }
+    this.lasso = {
+      active: false,
+      cow: null,
+      phase: "throwing",
+      throwT: 0,
+      clickCount: 0,
+      timeLeft: 0,
+      flashTimer: 0,
+    };
+    this.icons = {
+      pull: new Image(),
+      base: new Image(),
+      cowboy: new Image(),
+      bookIcon: new Image(),
+      stakeIcon: new Image(),
+      eyeIcon: new Image(),
+      spaceKey: new Image(),
+    };
+
+    this.icons.bookIcon.src = "/sprites/hud/icons/book_icon.png";
+    this.icons.stakeIcon.src = "/sprites/hud/icons/stake_icon.png";
+    this.icons.eyeIcon.src = "/sprites/hud/icons/eye_icon.png";
+    this.icons.pull.src = "/sprites/hud/icons/lasso_icon.png";
+    this.icons.base.src = "/sprites/hud/icons/key_icon.png";
+    this.icons.cowboy.src = "/sprites/hud/icons/lasso_icon.png";
+    this.icons.spaceKey.src = "/sprites/hud/icons/space_key_icon.png";
+
+    this.statsMinimized = window.innerWidth < 500;
+    if (!this.isPreview) this.setupChatInput();
+    this.setupInput();
+    this.resize();
+    window.addEventListener("resize", () => this.resize());
+
+    if (!this.isPreview) {
+      // Rede multiplayer
+      this.network = new Network();
+      this.network.connect(userData!.token, {
+        onInit: (id, _color, _name, existing) => {
+          this.myId = id;
+          // color e name já foram carregados do login — não sobrescreve
+          for (const p of existing) this.remotePlayers.set(p.id, p);
+        },
+        onJoin: (p) => {
+          this.remotePlayers.set(p.id, p);
+        },
+        onMove: (u) => {
+          const p = this.remotePlayers.get(u.id);
+          if (p) Object.assign(p, u);
+        },
+        onLeave: (id) => {
+          this.remotePlayers.delete(id);
+          // Vacas no curral permanecem visíveis mesmo após desconexão
+        },
+        onCowBased: (batch) => {
+          if (batch.id === this.myId) {
+            // Aplica posições canônicas do servidor nas vacas locais no curral
+            const localBased = this.cows
+              .filter((c) => c.state === "based")
+              .sort((a, b) => a.herdIndex - b.herdIndex);
+            batch.cows.forEach((pos, i) => {
+              if (localBased[i]) {
+                localBased[i]!.col = pos.col;
+                localBased[i]!.row = pos.row;
+              }
+            });
+          } else {
+            // Vacas de outro jogador — armazena para renderização
+            this.remoteCowsInBase.set(batch.id, {
+              color: batch.color,
+              cows: batch.cows,
+            });
+          }
+        },
+        onChat: (msg) => {
+          this.chatMessages.push({ ...msg, time: Date.now() });
+          if (this.chatMessages.length > 50) this.chatMessages.shift();
+        },
+      });
+
+      window.addEventListener("beforeunload", () => {
+        // sendBeacon garante entrega mesmo ao fechar a aba (fetch seria cancelado)
+        const payload = JSON.stringify({
+          token: this.myToken,
+          basedCount: this.basedCount,
+          discovered: [...this.discovered],
+          capturedByType: Object.fromEntries(this.capturedByType),
+          basedCowTypes: this.cows
+            .filter((c) => c.state === "based")
+            .sort((a, b) => a.herdIndex - b.herdIndex)
+            .map((c) => c.type.id),
+        });
+        navigator.sendBeacon(
+          "/auth/save",
+          new Blob([payload], { type: "application/json" }),
+        );
+      });
+    } // end if (!this.isPreview)
+    this.rafId = requestAnimationFrame((t) => this.loop(t));
+  }
+
+  destroy() {
+    cancelAnimationFrame(this.rafId);
+    this.chatInput?.remove();
+  }
+
+  private resize() {
+    this.canvas.width = window.innerWidth;
+    this.canvas.height = window.innerHeight;
+  }
+
+  // ─── Input ────────────────────────────────────────────────────────────────
+
+  private setupChatInput() {
+    const input = document.createElement("input");
+    input.type = "text";
+    input.placeholder = "Mensagem... (Enter=enviar, Esc=fechar)";
+    input.maxLength = 200;
+    Object.assign(input.style, {
+      position: "fixed",
+      bottom: "130px",
+      left: "10px",
+      width: "260px",
+      padding: "6px 10px",
+      background: "rgba(30,15,4,0.92)",
+      border: "2px solid #9b7e57",
+      borderRadius: "3px",
+      color: "#FFE0A0",
+      font: "13px sans-serif",
+      outline: "none",
+      display: "none",
+      zIndex: "10",
+      boxSizing: "border-box",
+    });
+    input.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter") {
+        const text = input.value.trim();
+        if (text) this.network?.sendChat(text);
+        this.closeChatInput();
+      } else if (e.key === "Escape") {
+        this.closeChatInput();
+      }
+    });
+    // Sem blur automático — fechamento controlado pelo canvas
+    document.body.appendChild(input);
+    this.chatInput = input;
+  }
+
+  private openChatInput() {
+    if (!this.chatInput) return;
+    this.chatOpen = true;
+    // Fica acima do joystick (top em H-142) e do painel de chat
+    this.chatInput.style.bottom = "160px";
+    this.chatInput.style.left = "10px";
+    this.chatInput.style.width = "260px";
+    this.chatInput.style.display = "block";
+    this.chatInput.value = "";
+    this.chatInput.focus();
+  }
+
+  private closeChatInput() {
+    if (!this.chatInput) return;
+    this.chatOpen = false;
+    this.chatInput.style.display = "none";
+  }
+
+  private setupInput() {
+    window.addEventListener("keydown", (e) => {
+      if (this.isPreview || this.chatOpen) return;
+      this.keys.add(e.key.toLowerCase());
+      if (e.key === " " || e.key.toLowerCase() === "e") this.handleAction();
+      if (e.key.toLowerCase() === "b") this.toggleBook();
+      if (e.key.toLowerCase() === "q") this.toggleStakeAim();
+      if (e.key.toLowerCase() === "t") {
+        this.openChatInput();
+        e.preventDefault();
+        return;
+      }
+      if (e.key === "Escape") {
+        if (this.stake.phase === "aiming") this.stake.phase = "idle";
+        else this.toggleBook();
+      }
+    });
+    window.addEventListener("keyup", (e) =>
+      this.keys.delete(e.key.toLowerCase()),
+    );
+    this.canvas.addEventListener("pointerdown", (e) => {
+      if (!this.isPreview) this.onPointerDown(e);
+    });
+    this.canvas.addEventListener("pointermove", (e) => {
+      if (!this.isPreview) this.onPointerMove(e);
+    });
+    this.canvas.addEventListener("pointerup", (e) => {
+      if (!this.isPreview) this.onPointerUp(e);
+    });
+  }
+
+  private onPointerDown(e: PointerEvent) {
+    const W = this.canvas.width,
+      H = this.canvas.height;
+    const x = e.clientX,
+      y = e.clientY;
+
+    // Chat button — toggle (processado primeiro, antes de tudo)
+    const chatBtnX = W - 80,
+      chatBtnY = H - 260;
+    if (Math.hypot(x - chatBtnX, y - chatBtnY) < 36) {
+      if (this.chatOpen) this.closeChatInput();
+      else this.openChatInput();
+      return;
+    }
+
+    // Clicar em qualquer outro lugar do canvas fecha o chat
+    if (this.chatOpen) {
+      this.closeChatInput();
+      return;
+    }
+
+    // Book close button — match the rendered close-btn centre exactly
+    if (this.bookOpen) {
+      const BW = Math.min(W - 32, 500),
+        BH = Math.min(H - 32, 620);
+      const BX = (W - BW) / 2,
+        BY = (H - BH) / 2;
+      // Close btn drawn at (BX+BW-54, BY+8, 48, 40) → centre (BX+BW-30, BY+28)
+      const closeCX = BX + BW - 30,
+        closeCY = BY + 28;
+      if (Math.hypot(x - closeCX, y - closeCY) < 28) {
+        this.bookOpen = false;
+        return;
+      }
+      return; // swallow input while book is open
+    }
+
+    // Stats panel toggle
+    if (this.statsMinimized) {
+      // Tap anywhere on compact badge to expand
+      if (x >= 6 && x <= 136 && y >= 6 && y <= 50) {
+        this.statsMinimized = false;
+        return;
+      }
+    } else {
+      // Collapse button: drawPixelBtn(196, 10, 26, 26)
+      if (x >= 192 && x <= 228 && y >= 6 && y <= 40) {
+        this.statsMinimized = true;
+        return;
+      }
+    }
+
+    // Book button (top-right HUD area)
+    const bookBtnX = W - 50,
+      bookBtnY = 50;
+    if (Math.hypot(x - bookBtnX, y - bookBtnY) < 26) {
+      this.toggleBook();
+      return;
+    }
+
+    // Action button (bottom-right)
+    const ax = W - 80,
+      ay = H - 80;
+    if (Math.hypot(x - ax, y - ay) < 56) {
+      this.handleAction();
+      return;
+    }
+
+    // Joystick zone: bottom-left
+    if (x < W / 2 && y > H * 0.55) {
+      this.joystick = {
+        active: true,
+        touchId: e.pointerId,
+        startX: x,
+        startY: y,
+        dx: 0,
+        dy: 0,
+      };
+      e.preventDefault();
+      return;
+    }
+
+    // Stake aiming — click on map to throw
+    if (this.stake.phase === "aiming") {
+      this.throwStakeTo(x, y);
+      return;
+    }
+
+    // Stake button (bottom-right of action button)
+    const stakeX = W - 80,
+      stakeY = H - 170;
+    if (Math.hypot(x - stakeX, y - stakeY) < 36) {
+      this.toggleStakeAim();
+      return;
+    }
+
+    // Click on a cow
+    for (const cow of this.cows) {
+      if (cow.state !== "wandering") continue;
+      const s = this.isoToScreen(cow.col, cow.row);
+      if (
+        Math.hypot(x - s.x, y - (s.y - 12)) < 34 &&
+        dist(this.player, cow) <= CAPTURE_DIST
+      ) {
+        this.startLasso(cow);
+        return;
+      }
+    }
+  }
+
+  private onPointerMove(e: PointerEvent) {
+    if (!this.joystick.active || e.pointerId !== this.joystick.touchId) return;
+    const maxR = 50;
+    const dx = e.clientX - this.joystick.startX;
+    const dy = e.clientY - this.joystick.startY;
+    const d = Math.hypot(dx, dy);
+    const f = Math.min(d, maxR) / maxR;
+    this.joystick.dx = (d > 0 ? dx / d : 0) * f;
+    this.joystick.dy = (d > 0 ? dy / d : 0) * f;
+    e.preventDefault();
+  }
+
+  private onPointerUp(e: PointerEvent) {
+    if (e.pointerId === this.joystick.touchId) {
+      this.joystick.active = false;
+      this.joystick.dx = 0;
+      this.joystick.dy = 0;
+    }
+  }
+
+  private handleAction() {
+    if (this.bookOpen) return;
+    if (this.lasso.active && this.lasso.phase === "pulling") {
+      this.lasso.clickCount++;
+      this.lasso.flashTimer = 0.12;
+      return;
+    }
+    if (this.lasso.active) return;
+    if (this.isAtBase() && this.herdCows().length > 0) {
+      this.depositCows();
+      return;
+    }
+    const cow = this.nearestWanderingCow();
+    if (cow && dist(this.player, cow) <= CAPTURE_DIST) this.startLasso(cow);
+  }
+
+  private toggleBook() {
+    this.bookOpen = !this.bookOpen;
+  }
+
+  private toggleStakeAim() {
+    if (this.stake.phase === "flying" || this.stake.phase === "pulling") return;
+    if (this.stake.phase === "anchored") return; // waiting for auto-pull
+    this.stake.phase = this.stake.phase === "aiming" ? "idle" : "aiming";
+  }
+
+  private throwStakeTo(screenX: number, screenY: number) {
+    // Convert screen click to iso grid
+    const wx = screenX - this.camX;
+    const wy = screenY - this.camY;
+    const targetCol = wx / TILE_W + wy / TILE_H;
+    const targetRow = -wx / TILE_W + wy / TILE_H;
+
+    const d = dist(this.player, { col: targetCol, row: targetRow });
+    if (d > STAKE_RANGE) return; // out of range
+
+    const tc = Math.floor(targetCol),
+      tr = Math.floor(targetRow);
+    if (tc < 0 || tc >= MAP_COLS || tr < 0 || tr >= MAP_ROWS) return;
+    const tile = this.map[tr]?.[tc];
+    if (!tile || tile.type === "water") return; // must land on solid ground
+    if (isObstacle(tile)) return;
+
+    this.stake.phase = "flying";
+    this.stake.targetCol = targetCol;
+    this.stake.targetRow = targetRow;
+    this.stake.flyCol = this.player.col;
+    this.stake.flyRow = this.player.row;
+  }
+
+  private screenToIso(sx: number, sy: number) {
+    const wx = sx - this.camX,
+      wy = sy - this.camY;
+    return { col: wx / TILE_W + wy / TILE_H, row: -wx / TILE_W + wy / TILE_H };
+  }
+
+  // ─── Logic ────────────────────────────────────────────────────────────────
+
+  private loop(t: number) {
+    const dt = Math.min((t - this.lastTime) / 1000, 0.1);
+    this.lastTime = t;
+    this.time += dt;
+    if (!this.bookOpen) {
+      this.update(dt);
+    }
+    this.render();
+    requestAnimationFrame((t2) => this.loop(t2));
+  }
+
+  private update(dt: number) {
+    this.updateCamera();
+    this.updateStake(dt); // always runs (independent of lasso)
+    const beingPulled = this.stake.phase === "pulling";
+    if (!this.lasso.active) {
+      if (!beingPulled) this.updatePlayer(dt);
+      else this.updateStakePull(dt);
+      this.updateCows(dt);
+    } else {
+      this.updateLasso(dt);
+    }
+
+    // Envio de posição para outros jogadores (20 vezes/seg)
+    this.netSendTimer -= dt;
+    if (this.netSendTimer <= 0) {
+      this.netSendTimer = 0.05;
+      this.network?.sendMove(
+        this.player.col,
+        this.player.row,
+        this.player.dirCol,
+        this.player.dirRow,
+        this.player.moving,
+        this.herdCows().length,
+      );
+    }
+
+    // Respawn de vacas a cada 45-75s, sem ultrapassar COW_COUNT ativas
+    this.cowSpawnTimer -= dt;
+    if (this.cowSpawnTimer <= 0) {
+      const active = this.cows.filter(
+        (c) => c.state === "wandering" || c.state === "fleeing" ||
+               c.state === "lassoed"  || c.state === "captured",
+      ).length;
+      if (active < COW_COUNT) {
+        this.cows.push(spawnCow(this.nextCowId++, this.map));
+      }
+      this.cowSpawnTimer = 45 + Math.random() * 30;
+    }
+
+    // Autosave a cada 60 segundos
+    this.saveTimer -= dt;
+    if (this.saveTimer <= 0) {
+      this.saveTimer = 60;
+      this.triggerSave();
+    }
+  }
+
+  private triggerSave() {
+    const discovered = [...this.discovered];
+    const capturedByType = Object.fromEntries(this.capturedByType);
+    const basedCowTypes = this.cows
+      .filter((c) => c.state === "based")
+      .sort((a, b) => a.herdIndex - b.herdIndex)
+      .map((c) => c.type.id);
+    // Via WebSocket (mais eficiente — já conectado)
+    this.network?.sendSave(this.basedCount, discovered, capturedByType, basedCowTypes);
+    // Via HTTP com keepalive — garante entrega mesmo ao fechar a aba
+    saveGameState(this.myToken, this.basedCount, discovered, capturedByType, basedCowTypes);
+  }
+
+  private updateStake(dt: number) {
+    const s = this.stake;
+
+    if (s.phase === "flying") {
+      // Move stake toward target at STAKE_FLY_SPEED
+      const dc = s.targetCol - s.flyCol,
+        dr = s.targetRow - s.flyRow;
+      const d = Math.hypot(dc, dr);
+      const step = STAKE_FLY_SPEED * dt;
+      if (d <= step) {
+        // Landed!
+        s.flyCol = s.targetCol;
+        s.flyRow = s.targetRow;
+        s.phase = "anchored";
+        // Begin pull immediately
+        s.pullStartCol = this.player.col;
+        s.pullStartRow = this.player.row;
+        s.pullDist = Math.max(
+          0.1,
+          dist(this.player, { col: s.targetCol, row: s.targetRow }),
+        );
+        s.pullT = 0;
+        s.phase = "pulling";
+      } else {
+        s.flyCol += (dc / d) * step;
+        s.flyRow += (dr / d) * step;
+      }
+    }
+  }
+
+  private updateStakePull(dt: number) {
+    const s = this.stake;
+    const speed = STAKE_PULL_SPEED / s.pullDist; // progress units per second
+    s.pullT = Math.min(1, s.pullT + speed * dt);
+
+    // Ease-in-out for smooth feel
+    const ease =
+      s.pullT < 0.5
+        ? 2 * s.pullT * s.pullT
+        : 1 - Math.pow(-2 * s.pullT + 2, 2) / 2;
+
+    this.player.col = s.pullStartCol + (s.targetCol - s.pullStartCol) * ease;
+    this.player.row = s.pullStartRow + (s.targetRow - s.pullStartRow) * ease;
+
+    if (s.pullT >= 1) {
+      // Arrived — recover stake
+      this.player.col = s.targetCol;
+      this.player.row = s.targetRow;
+      s.phase = "idle";
+    }
+  }
+
+  private updateCamera() {
+    const sx = (this.player.col - this.player.row) * (TILE_W / 2);
+    const sy = (this.player.col + this.player.row) * (TILE_H / 2);
+    this.camX = this.canvas.width / 2 - sx;
+    this.camY = this.canvas.height / 2 - sy - 40;
+  }
+
+  private updatePlayer(dt: number) {
+    let dc = 0,
+      dr = 0;
+    if (this.keys.has("w") || this.keys.has("arrowup")) {
+      dc--;
+      dr--;
+    }
+    if (this.keys.has("s") || this.keys.has("arrowdown")) {
+      dc++;
+      dr++;
+    }
+    if (this.keys.has("a") || this.keys.has("arrowleft")) {
+      dc--;
+      dr++;
+    }
+    if (this.keys.has("d") || this.keys.has("arrowright")) {
+      dc++;
+      dr--;
+    }
+    if (this.joystick.active) {
+      dc += this.joystick.dx + this.joystick.dy;
+      dr += -this.joystick.dx + this.joystick.dy;
+    }
+    const len = Math.hypot(dc, dr);
+    if (len > 0) {
+      dc /= len;
+      dr /= len;
+      const nc = Math.max(
+        0.5,
+        Math.min(MAP_COLS - 1.5, this.player.col + dc * PLAYER_SPEED * dt),
+      );
+      const nr = Math.max(
+        0.5,
+        Math.min(MAP_ROWS - 1.5, this.player.row + dr * PLAYER_SPEED * dt),
+      );
+      const tc = this.map[Math.floor(nr)]![Math.floor(nc)]!;
+      if (!isObstacle(tc)) {
+        this.player.col = nc;
+        this.player.row = nr;
+      }
+      if (dc !== 0) this.player.dirCol = dc > 0 ? 1 : -1;
+      if (dr !== 0) this.player.dirRow = dr > 0 ? 1 : -1;
+      this.player.moving = true;
+    } else {
+      this.player.moving = false;
+    }
+    this.updateHerd(dt);
+  }
+
+  private updateHerd(dt: number) {
+    const herd = this.herdCows();
+    let prevCol = this.player.col,
+      prevRow = this.player.row;
+    for (const cow of herd) {
+      const dc = prevCol - cow.col,
+        dr = prevRow - cow.row;
+      const d = Math.hypot(dc, dr);
+      if (d > HERD_SPACING) {
+        const spd = Math.min(HERD_FOLLOW_SPEED, d * 6) * dt;
+        cow.col += (dc / d) * spd;
+        cow.row += (dr / d) * spd;
+      }
+      prevCol = cow.col;
+      prevRow = cow.row;
+    }
+  }
+
+  private updateCows(dt: number) {
+    for (const cow of this.cows) {
+      if (cow.sparkTimer > 0) cow.sparkTimer -= dt;
+      if (cow.state !== "wandering" && cow.state !== "fleeing") continue;
+
+      // ── Full flee (after failed lasso) ───────────────────────────────────
+      if (cow.state === "fleeing") {
+        const dc = cow.col - this.player.col,
+          dr = cow.row - this.player.row;
+        const d = Math.hypot(dc, dr);
+        if (d < 10 && d > 0) {
+          const nc = cow.col + (dc / d) * COW_FLEE_SPEED * dt;
+          const nr = cow.row + (dr / d) * COW_FLEE_SPEED * dt;
+          if (!isObstacle(this.map[Math.floor(nr)]![Math.floor(nc)]!)) {
+            cow.col = Math.max(1, Math.min(MAP_COLS - 2, nc));
+            cow.row = Math.max(1, Math.min(MAP_ROWS - 2, nr));
+          }
+        } else {
+          cow.state = "wandering";
+          cow.wanderTimer = 1;
+        }
+        continue;
+      }
+
+      // ── Wary: slowly back away when player is too close ──────────────────
+      if (cow.type.fearDistance > 0) {
+        const pd = dist(this.player, cow);
+        if (pd < cow.type.fearDistance && pd > 0.5) {
+          const dc = cow.col - this.player.col,
+            dr = cow.row - this.player.row;
+          const len = Math.hypot(dc, dr);
+          // Speed scales with proximity: faster the closer the player
+          const intensity = 1 - pd / cow.type.fearDistance;
+          const speed = cow.type.fearSpeed * intensity;
+          const nc = cow.col + (dc / len) * speed * dt;
+          const nr = cow.row + (dr / len) * speed * dt;
+          const tc = this.map[Math.floor(nr)]?.[Math.floor(nc)];
+          if (tc && !isObstacle(tc)) {
+            cow.col = Math.max(1, Math.min(MAP_COLS - 2, nc));
+            cow.row = Math.max(1, Math.min(MAP_ROWS - 2, nr));
+          } else {
+            // Blocked by obstacle — try sliding along it
+            const ncX = cow.col + (dc / len) * speed * dt;
+            const tcX = this.map[Math.floor(cow.row)]?.[Math.floor(ncX)];
+            if (tcX && !isObstacle(tcX))
+              cow.col = Math.max(1, Math.min(MAP_COLS - 2, ncX));
+            const nrY = cow.row + (dr / len) * speed * dt;
+            const tcY = this.map[Math.floor(nrY)]?.[Math.floor(cow.col)];
+            if (tcY && !isObstacle(tcY))
+              cow.row = Math.max(1, Math.min(MAP_ROWS - 2, nrY));
+          }
+          continue;
+        }
+      }
+
+      // ── Normal wander ────────────────────────────────────────────────────
+      cow.wanderTimer -= dt;
+      if (cow.wanderTimer <= 0) {
+        const a = Math.random() * Math.PI * 2;
+        cow.wanderDirCol = Math.cos(a);
+        cow.wanderDirRow = Math.sin(a);
+        cow.wanderTimer = 2 + Math.random() * 3;
+      }
+      const nc = cow.col + cow.wanderDirCol * COW_WANDER_SPEED * dt;
+      const nr = cow.row + cow.wanderDirRow * COW_WANDER_SPEED * dt;
+      const tc = this.map[Math.floor(nr)]?.[Math.floor(nc)];
+      if (tc && !isObstacle(tc)) {
+        cow.col = Math.max(1, Math.min(MAP_COLS - 2, nc));
+        cow.row = Math.max(1, Math.min(MAP_ROWS - 2, nr));
+      } else {
+        cow.wanderTimer = 0;
+      }
+    }
+  }
+
+  private updateLasso(dt: number) {
+    const l = this.lasso;
+    if (!l.cow) {
+      l.active = false;
+      return;
+    }
+    if (l.flashTimer > 0) l.flashTimer -= dt;
+
+    if (l.phase === "throwing") {
+      l.throwT += dt / LASSO_THROW_DURATION;
+      if (l.throwT >= 1) {
+        l.throwT = 1;
+        l.phase = "pulling";
+        l.timeLeft = LASSO_TIME_LIMIT;
+        l.clickCount = 0;
+      }
+      return;
+    }
+    if (l.phase === "pulling") {
+      l.timeLeft -= dt;
+      if (l.clickCount >= l.cow.type.clicksNeeded) {
+        this.captureCow(l.cow);
+        l.active = false;
+        return;
+      }
+      if (l.timeLeft <= 0) {
+        l.phase = "fail";
+        l.cow.state = "fleeing";
+        setTimeout(() => {
+          this.lasso.active = false;
+        }, 700);
+      }
+    }
+  }
+
+  private captureCow(cow: Cow) {
+    const herdLen = this.herdCows().length;
+    cow.state = "captured";
+    cow.herdIndex = herdLen;
+    cow.col = this.player.col;
+    cow.row = this.player.row;
+    cow.sparkTimer = 1.5;
+    this.discovered.add(cow.type.id);
+    this.capturedByType.set(
+      cow.type.id,
+      (this.capturedByType.get(cow.type.id) ?? 0) + 1,
+    );
+  }
+
+  private depositCows() {
+    const herd = this.herdCows();
+    const startIdx = this.basedCount; // índice cumulativo antes deste lote
+    this.basedCount += herd.length;
+    for (let i = 0; i < herd.length; i++) {
+      const cow = herd[i]!;
+      cow.state = "based";
+      cow.herdIndex = startIdx + i;
+      // Posição determinística pelo índice — não precisa esperar o servidor
+      const pos = basedSlotPos(startIdx + i);
+      cow.col = pos.col;
+      cow.row = pos.row;
+      // Respawn gerenciado pelo cowSpawnTimer no update loop
+    }
+    // Notifica outros jogadores (multiplayer visual)
+    this.network?.sendCowBased(herd.map((c) => c.type.id));
+    // Salva imediatamente — não espera o timer de 60s
+    this.triggerSave();
+  }
+
+  private startLasso(cow: Cow) {
+    cow.state = "lassoed";
+    this.discovered.add(cow.type.id);
+    this.lasso = {
+      active: true,
+      cow,
+      phase: "throwing",
+      throwT: 0,
+      clickCount: 0,
+      timeLeft: 0,
+      flashTimer: 0,
+    };
+  }
+
+  private isAtBase() {
+    const c = Math.floor(this.player.col),
+      r = Math.floor(this.player.row);
+    return (
+      c >= BASE_COL &&
+      c < BASE_COL + BASE_SIZE &&
+      r >= BASE_ROW &&
+      r < BASE_ROW + BASE_SIZE
+    );
+  }
+  private herdCows() {
+    return this.cows
+      .filter((c) => c.state === "captured")
+      .sort((a, b) => a.herdIndex - b.herdIndex);
+  }
+  private nearestWanderingCow(): Cow | null {
+    let best: Cow | null = null,
+      bd = Infinity;
+    for (const c of this.cows) {
+      if (c.state !== "wandering") continue;
+      const d = dist(this.player, c);
+      if (d < bd) {
+        bd = d;
+        best = c;
+      }
+    }
+    return best;
+  }
+
+  // ─── Coordinates ──────────────────────────────────────────────────────────
+
+  private isoToScreen(col: number, row: number) {
+    return {
+      x: (col - row) * (TILE_W / 2) + this.camX,
+      y: (col + row) * (TILE_H / 2) + this.camY,
+    };
+  }
+
+  private visibleTileRange() {
+    const { camX: cx, camY: cy } = this;
+    const W = this.canvas.width,
+      H = this.canvas.height;
+    const hw = TILE_W / 2,
+      hh = TILE_H / 2;
+    const buf = 3;
+    const sMin = Math.floor(-cy / hh) - buf;
+    const sMax = Math.ceil((H - cy) / hh) + buf;
+    const dMin = Math.floor(-cx / hw) - buf;
+    const dMax = Math.ceil((W - cx) / hw) + buf;
+    return {
+      colMin: Math.max(0, Math.floor((sMin + dMin) / 2)),
+      colMax: Math.min(MAP_COLS - 1, Math.ceil((sMax + dMax) / 2)),
+      rowMin: Math.max(0, Math.floor((sMin - dMax) / 2)),
+      rowMax: Math.min(MAP_ROWS - 1, Math.ceil((sMax - dMin) / 2)),
+    };
+  }
+
+  // ─── Render ───────────────────────────────────────────────────────────────
+
+  private render() {
+    const { ctx, canvas } = this;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Sky
+    const g = ctx.createLinearGradient(0, 0, 0, canvas.height * 0.55);
+    g.addColorStop(0, "#3a7fbf");
+    g.addColorStop(1, "#a8d8ea");
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    this.renderMap();
+    this.renderStakeAimRing(); // range ring drawn under entities
+    this.renderEntities();
+    this.renderLasso();
+    this.renderStake();
+    if (this.bookOpen) this.renderBook();
+    else this.renderUI();
+  }
+
+  // ─── Tile drawing ─────────────────────────────────────────────────────────
+
+  private static TILE_COLORS: Record<TileType, [string, string, string]> = {
+    grass: ["#56a832", "#346018", "#446828"],
+    dry_grass: ["#a0b040", "#707020", "#888030"],
+    dirt: ["#c89060", "#9a6838", "#b07848"],
+    sand: ["#e8d090", "#c8a850", "#d8bc70"],
+    rock: ["#8a8a8a", "#585858", "#6a6a6a"],
+    water: ["#4a90d9", "#2a6090", "#3a7ab0"],
+    base: ["#d4b070", "#a07838", "#c09048"],
+  };
+
+  // Maps tile type → sprite path (inside /sprites/tiles/)
+  private static TILE_SPRITES: Partial<Record<TileType, string>> = {
+    grass: "tiles/tile_grass.png",
+    dry_grass: "tiles/tile_dry_grass.png",
+    dirt: "tiles/tile_dirt.png",
+    sand: "tiles/tile_sand.png",
+    rock: "tiles/tile_rock.png",
+    base: "tiles/tile_base.png",
+    // water uses animation sheet below — no static entry needed
+  };
+
+  // Checkerboard alternate for grass
+  private static TILE_SPRITES_ALT: Partial<Record<TileType, string>> = {
+    grass: "tiles/tile_grass_dark.png",
+  };
+
+  // Animated sprite sheets: { path, frames, fps }
+  private static TILE_ANIM: Partial<
+    Record<TileType, { path: string; frames: number; fps: number }>
+  > = {
+    water: { path: "tiles/tile_water_anim.png", frames: 4, fps: 4 },
+  };
+
+  // ─── Craftpix HUD asset path (Main_tiles.png used for border artwork only) ───
+  private static readonly CP =
+    "hud/craftpix-net-255216-free-basic-pixel-art-ui-for-rpg/PNG/";
+  private static HUD_TILES = Game.CP + "Main_tiles.png"; // 384×304
+
+  // ─── Panel — draws a craftpix-style brown wood pixel-art panel ─────────────
+  // Color palette measured from Main_tiles.png:
+  //   interior fill  → #4a2e0f (dark wood)
+  //   inner edge     → rgb(131,99,68) = #836344 (medium wood)
+  //   outer rim      → rgb(155,126,87) = #9b7e57
+  //   highlight      → rgb(176,149,105) = #b09569
+  //   gold accent    → #c89040
+  private drawPanel(x: number, y: number, w: number, h: number, style = 0) {
+    const { ctx } = this;
+    const img = sprites.get(Game.HUD_TILES);
+
+    // ── Interior fill ──────────────────────────────────────────────────────────
+    // Tint variants: 0=warm brown, 1=darker, 2=grey-green, 3=olive
+    const fills = ["#3a2208", "#2a1606", "#2e3022", "#2c3020"];
+    const rims = ["#9b7e57", "#7a5e38", "#7a8a64", "#686e4a"];
+    const accents = ["#c89040", "#a07028", "#98a060", "#8a9050"];
+
+    ctx.save();
+
+    // 4-px outer rim
+    ctx.fillStyle = rims[style] ?? rims[0]!;
+    ctx.fillRect(x, y, w, h);
+
+    // 2-px mid edge
+    ctx.fillStyle = "#836344";
+    ctx.fillRect(x + 4, y + 4, w - 8, h - 8);
+
+    // inner fill
+    ctx.fillStyle = fills[style] ?? fills[0]!;
+    ctx.fillRect(x + 6, y + 6, w - 12, h - 12);
+
+    // 1-px gold accent line (inner border)
+    ctx.strokeStyle = accents[style] ?? accents[0]!;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x + 7.5, y + 7.5, w - 15, h - 15);
+
+    // ── Corner studs (pixel art detail) ──────────────────────────────────────
+    ctx.fillStyle = accents[style] ?? accents[0]!;
+    const cs = 4;
+    ctx.fillRect(x + 2, y + 2, cs, cs);
+    ctx.fillRect(x + w - 2 - cs, y + 2, cs, cs);
+    ctx.fillRect(x + 2, y + h - 2 - cs, cs, cs);
+    ctx.fillRect(x + w - 2 - cs, y + h - 2 - cs, cs, cs);
+
+    // ── Overlay border sprite from Main_tiles.png if loaded ──────────────────
+    // Use only the corner and edge pieces of style 0 at their natural size (26/8/24 × 37 px)
+    // drawn at the four corners/edges — this adds authentic pixel art border detail
+    if (img) {
+      ctx.imageSmoothingEnabled = false;
+      const SO = Math.floor(style) * 96;
+      const SX_L = SO + 11,
+        SX_M = SO + 48,
+        SX_R = SO + 64;
+      const CL = 26,
+        CM = 8,
+        CR = 24;
+
+      // Use a thin 12px slice of each border cell so we get the textured edge
+      // without the wide banding that makes the stripes visible
+      const BT = 12; // border thickness to draw
+
+      // ── Top edge ────────
+      ctx.drawImage(img, SX_L, 0, CL, BT, x, y, CL, BT);
+      for (let tx = CL; tx < w - CR; tx += CM)
+        ctx.drawImage(
+          img,
+          SX_M,
+          0,
+          CM,
+          BT,
+          x + tx,
+          y,
+          Math.min(CM, w - CR - tx),
+          BT,
+        );
+      ctx.drawImage(img, SX_R, 0, CR, BT, x + w - CR, y, CR, BT);
+      // ── Bottom edge ────
+      ctx.drawImage(img, SX_L, 96 + 37 - BT, CL, BT, x, y + h - BT, CL, BT);
+      for (let tx = CL; tx < w - CR; tx += CM)
+        ctx.drawImage(
+          img,
+          SX_M,
+          96 + 37 - BT,
+          CM,
+          BT,
+          x + tx,
+          y + h - BT,
+          Math.min(CM, w - CR - tx),
+          BT,
+        );
+      ctx.drawImage(
+        img,
+        SX_R,
+        96 + 37 - BT,
+        CR,
+        BT,
+        x + w - CR,
+        y + h - BT,
+        CR,
+        BT,
+      );
+      // ── Left edge ──────
+      ctx.drawImage(img, SX_L, 0, BT, 37, x, y, BT, Math.min(37, h));
+      // ── Right edge ─────
+      ctx.drawImage(
+        img,
+        SX_R + CR - BT,
+        0,
+        BT,
+        37,
+        x + w - BT,
+        y,
+        BT,
+        Math.min(37, h),
+      );
+    }
+
+    ctx.restore();
+  }
+
+  // ─── Button — craftpix-style wood pixel-art button ────────────────────────
+  // Three states:  normal (raised dark wood) | active (amber lit) | pressed (sunken)
+  private drawPixelBtn(
+    dx: number,
+    dy: number,
+    dw: number,
+    dh: number,
+    state: "normal" | "active" | "pressed" = "normal",
+    _wide = false, // kept for API compatibility
+  ) {
+    const { ctx } = this;
+    ctx.save();
+
+    // Base colors from craftpix palette
+    const bg =
+      state === "active"
+        ? "#9b6218"
+        : state === "pressed"
+          ? "#4a2808"
+          : "#5c3a10";
+    const rimTop =
+      state === "active"
+        ? "#e0a840"
+        : state === "pressed"
+          ? "#361808"
+          : "#9b7e57";
+    const rimBot =
+      state === "active"
+        ? "#7a4810"
+        : state === "pressed"
+          ? "#6a3c18"
+          : "#3a2208";
+    const inner =
+      state === "active"
+        ? "#c88430"
+        : state === "pressed"
+          ? "#382010"
+          : "#75491c";
+
+    // Outer rim
+    ctx.fillStyle = rimBot;
+    ctx.fillRect(dx, dy, dw, dh);
+    // Top-highlight rim
+    ctx.fillStyle = rimTop;
+    ctx.fillRect(dx, dy, dw, 3);
+    ctx.fillRect(dx, dy, 3, dh);
+    // Inner face
+    ctx.fillStyle = bg;
+    ctx.fillRect(dx + 3, dy + 3, dw - 5, dh - 5);
+    // Subtle inner bevel
+    ctx.fillStyle = inner;
+    ctx.fillRect(dx + 4, dy + 4, dw - 7, dh - 7);
+    // 1-px gold border
+    ctx.strokeStyle = state === "active" ? "#ffd060" : "#a07838";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(dx + 1.5, dy + 1.5, dw - 3, dh - 3);
+
+    ctx.restore();
+  }
+
+  // Reusable diamond clip path (top face only)
+  private clipToDiamond(x: number, y: number, hw: number, hh: number) {
+    const { ctx } = this;
+    ctx.beginPath();
+    ctx.moveTo(x, y - hh);
+    ctx.lineTo(x + hw, y);
+    ctx.lineTo(x, y + hh);
+    ctx.lineTo(x - hw, y);
+    ctx.closePath();
+    ctx.clip();
+  }
+
+  private drawTile(col: number, row: number, tile: Tile) {
+    const { ctx } = this;
+    const { x, y } = this.isoToScreen(col, row);
+    const hw = TILE_W / 2,
+      hh = TILE_H / 2,
+      depth = 7;
+
+    // ── Side faces (always canvas) ────────────────────────────────────────────
+    const [, sideL, sideR] = Game.TILE_COLORS[tile.type];
+
+    ctx.fillStyle = sideL;
+    ctx.beginPath();
+    ctx.moveTo(x - hw, y);
+    ctx.lineTo(x, y + hh);
+    ctx.lineTo(x, y + hh + depth);
+    ctx.lineTo(x - hw, y + depth);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = sideR;
+    ctx.beginPath();
+    ctx.moveTo(x, y + hh);
+    ctx.lineTo(x + hw, y);
+    ctx.lineTo(x + hw, y + depth);
+    ctx.lineTo(x, y + hh + depth);
+    ctx.closePath();
+    ctx.fill();
+
+    // ── Top face: sprite (clipped to diamond) or canvas fallback ─────────────
+    const isDark = (col + row) % 2 === 0;
+
+    // Animated sprite sheet (e.g. water)
+    const anim = Game.TILE_ANIM[tile.type];
+    if (anim) {
+      const img = sprites.get(anim.path);
+      if (img) {
+        const frame = Math.floor(this.time * anim.fps) % anim.frames;
+        const frameW = img.width / anim.frames;
+        ctx.save();
+        this.clipToDiamond(x, y, hw, hh);
+        ctx.drawImage(
+          img,
+          frame * frameW,
+          0,
+          frameW,
+          img.height,
+          x - hw,
+          y - hh,
+          TILE_W,
+          TILE_H,
+        );
+        ctx.restore();
+        ctx.strokeStyle = "rgba(0,0,0,0.12)";
+        ctx.lineWidth = 0.5;
+        ctx.beginPath();
+        ctx.moveTo(x, y - hh);
+        ctx.lineTo(x + hw, y);
+        ctx.lineTo(x, y + hh);
+        ctx.lineTo(x - hw, y);
+        ctx.closePath();
+        ctx.stroke();
+        return;
+      }
+    }
+
+    // Static sprite
+    const altPath = isDark ? Game.TILE_SPRITES_ALT[tile.type] : undefined;
+    const spritePath = altPath ?? Game.TILE_SPRITES[tile.type];
+    if (spritePath) {
+      const img = sprites.get(spritePath);
+      if (img) {
+        ctx.save();
+        this.clipToDiamond(x, y, hw, hh);
+        ctx.drawImage(img, x - hw, y - hh, TILE_W, TILE_H);
+        ctx.restore();
+        ctx.strokeStyle = "rgba(0,0,0,0.12)";
+        ctx.lineWidth = 0.5;
+        ctx.beginPath();
+        ctx.moveTo(x, y - hh);
+        ctx.lineTo(x + hw, y);
+        ctx.lineTo(x, y + hh);
+        ctx.lineTo(x - hw, y);
+        ctx.closePath();
+        ctx.stroke();
+        return;
+      }
+    }
+
+    // ── Canvas fallback top face ──────────────────────────────────────────────
+    let [top] = Game.TILE_COLORS[tile.type];
+
+    if (tile.type === "water") {
+      const wave = Math.sin(this.time * 1.5 + (col + row) * 0.4) * 0.06;
+      const b = Math.floor(0xd9 + wave * 0x30);
+      top = `rgb(74,${b},${217 + Math.floor(wave * 20)})`;
+    }
+    if (tile.type === "grass" && isDark) top = "#4e9e2c"; // canvas fallback only
+
+    ctx.fillStyle = top;
+    ctx.beginPath();
+    ctx.moveTo(x, y - hh);
+    ctx.lineTo(x + hw, y);
+    ctx.lineTo(x, y + hh);
+    ctx.lineTo(x - hw, y);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = "rgba(0,0,0,0.1)";
+    ctx.lineWidth = 0.5;
+    ctx.stroke();
+  }
+
+  /**
+   * plants.png layout: 9 columns × 2 rows, each cell 48 × 56 px
+   * Row 0 (large): col 0-3 = big trees/bushes, col 4-5 = shrubs, col 6-7 = flowering, col 8 = cactus
+   * Row 1 (medium): col 0-3 = medium bushes, col 4-5 = shrubs, col 6-7 = flowers, col 8 = small plant
+   */
+  private drawPlantSprite(
+    x: number,
+    y: number,
+    spriteCol: number,
+    spriteRow: number,
+    scale = 1,
+  ) {
+    const img = sprites.get("decorations/plants.png");
+    if (!img) return false;
+    const CW = 48,
+      CH = 56;
+    const dw = CW * scale,
+      dh = CH * scale;
+    this.ctx.drawImage(
+      img,
+      spriteCol * CW,
+      spriteRow * CH,
+      CW,
+      CH,
+      x - dw / 2,
+      y - dh + 8,
+      dw,
+      dh,
+    );
+    return true;
+  }
+
+  private drawDecoration(col: number, row: number, deco: Tile["decoration"]) {
+    if (deco === "none") return;
+    const { ctx } = this;
+    const { x, y } = this.isoToScreen(col, row);
+    const hash = col * 3 + row * 7;
+
+    if (deco === "tree") {
+      // Pick one of 4 large tree/bush variants (row 0, cols 0-3)
+      const variant = hash % 4;
+      if (this.drawPlantSprite(x, y, variant, 0, 1.1)) return;
+      // canvas fallback
+      ctx.fillStyle = "#5a3010";
+      ctx.fillRect(x - 3, y - 16, 6, 14);
+      for (let i = 2; i >= 0; i--) {
+        ctx.fillStyle = i === 0 ? "#2d7a20" : i === 1 ? "#388e3c" : "#43a047";
+        ctx.beginPath();
+        ctx.ellipse(
+          x + (i - 1) * 3,
+          y - 20 - i * 4,
+          14 - i,
+          10 - i,
+          0,
+          0,
+          Math.PI * 2,
+        );
+        ctx.fill();
+      }
+    } else if (deco === "bush") {
+      // Pick one of 4 medium bush variants (row 1, cols 0-3)
+      const variant = hash % 4;
+      if (this.drawPlantSprite(x, y, variant, 1, 0.9)) return;
+      // canvas fallback
+      ctx.fillStyle = "#2e7d32";
+      ctx.beginPath();
+      ctx.ellipse(x, y - 8, 10, 7, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#388e3c";
+      ctx.beginPath();
+      ctx.ellipse(x - 5, y - 6, 7, 5, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(x + 5, y - 6, 7, 5, 0, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (deco === "flower") {
+      // Use flowering sprites (row 0 or 1, cols 6-7)
+      const variant = hash % 2;
+      const sprRow = hash % 2;
+      if (this.drawPlantSprite(x, y, 6 + variant, sprRow, 0.7)) return;
+      // canvas fallback
+      const colors = ["#f44336", "#e91e63", "#ffeb3b", "#ff9800"];
+      ctx.fillStyle = colors[hash % colors.length]!;
+      ctx.beginPath();
+      ctx.arc(x, y - 2, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#ffff00";
+      ctx.beginPath();
+      ctx.arc(x, y - 2, 2, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (deco === "cactus") {
+      // Use col 8 (cactus/spiky plant) from row 0 or 1
+      const sprRow = hash % 2;
+      if (this.drawPlantSprite(x, y, 8, sprRow, 1.0)) return;
+      // canvas fallback
+      ctx.fillStyle = "#4caf50";
+      ctx.fillRect(x - 3, y - 22, 6, 20);
+      ctx.fillRect(x - 10, y - 16, 7, 4);
+      ctx.fillRect(x + 3, y - 13, 7, 4);
+    } else if (deco === "boulder") {
+      const img = sprites.get("decorations/rocks.png");
+      if (img) {
+        // 4 columns × ~5 rows of rocks; pick variant from tile hash
+        const variant = (col * 3 + row * 7) % 4;
+        const cellW = 64,
+          cellH = 64;
+        const sx = variant * cellW;
+        ctx.drawImage(img, sx, 0, cellW, cellH, x - 32, y - 56, 64, 64);
+      } else {
+        // canvas fallback
+        ctx.fillStyle = "#757575";
+        ctx.beginPath();
+        ctx.ellipse(x, y - 5, 10, 7, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#9e9e9e";
+        ctx.beginPath();
+        ctx.ellipse(x - 2, y - 7, 5, 4, -0.3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  private renderMap() {
+    const { colMin, colMax, rowMin, rowMax } = this.visibleTileRange();
+
+    for (let r = rowMin; r <= rowMax; r++) {
+      for (let c = colMin; c <= colMax; c++) {
+        const tile = this.map[r]![c]!;
+        this.drawTile(c, r, tile);
+      }
+    }
+
+    // Fence around base
+    this.renderFence();
+
+    // Base label
+    const { x, y } = this.isoToScreen(BASE_COL + BASE_SIZE / 2, BASE_ROW);
+    this.ctx.fillStyle = "rgba(0,0,0,0.55)";
+    this.ctx.font = "bold 12px sans-serif";
+    this.ctx.textAlign = "center";
+    this.ctx.fillText("🏠 BASE", x, y - 12);
+  }
+
+  private renderFence() {
+    const { ctx } = this;
+    const c1 = BASE_COL,
+      r1 = BASE_ROW;
+    const c2 = BASE_COL + BASE_SIZE,
+      r2 = BASE_ROW + BASE_SIZE;
+    ctx.strokeStyle = "#6B3410";
+    ctx.lineWidth = 2;
+
+    for (let i = 0; i <= BASE_SIZE; i++) {
+      this.drawFencePost(c1 + i, r1);
+      this.drawFencePost(c1 + i, r2);
+      this.drawFencePost(c1, r1 + i);
+      if (i < BASE_SIZE - 1) this.drawFencePost(c2, r1 + i);
+    }
+    for (let i = 0; i < BASE_SIZE; i++) {
+      const a = this.isoToScreen(c1 + i, r1),
+        b = this.isoToScreen(c1 + i + 1, r1);
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y - 4);
+      ctx.lineTo(b.x, b.y - 4);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+      const a2 = this.isoToScreen(c1, r1 + i),
+        b2 = this.isoToScreen(c1, r1 + i + 1);
+      ctx.beginPath();
+      ctx.moveTo(a2.x, a2.y - 4);
+      ctx.lineTo(b2.x, b2.y - 4);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(a2.x, a2.y);
+      ctx.lineTo(b2.x, b2.y);
+      ctx.stroke();
+    }
+  }
+
+  private drawFencePost(col: number, row: number) {
+    const { ctx } = this;
+    const { x, y } = this.isoToScreen(col, row);
+    ctx.fillStyle = "#5c2e08";
+    ctx.fillRect(x - 3, y - 16, 6, 20);
+    ctx.fillStyle = "#8B4513";
+    ctx.fillRect(x - 4, y - 18, 8, 5);
+  }
+
+  // ─── Entity rendering ──────────────────────────────────────────────────────
+
+  private renderEntities() {
+    const { colMin, colMax, rowMin, rowMax } = this.visibleTileRange();
+
+    // Pass 1: decorations (trees, etc.) in depth order
+    for (let r = rowMin; r <= rowMax; r++) {
+      for (let c = colMin; c <= colMax; c++) {
+        const tile = this.map[r]![c]!;
+        if (tile.decoration !== "none")
+          this.drawDecoration(c, r, tile.decoration);
+      }
+    }
+
+    // Pass 2: entities sorted by depth
+    type Item = { depth: number; draw: () => void };
+    const items: Item[] = [];
+
+    items.push({
+      depth: this.player.col + this.player.row,
+      draw: () => this.drawPlayer(),
+    });
+
+    for (const cow of this.cows) {
+      const c = cow;
+      items.push({
+        depth: c.col + c.row + (c.state === "based" ? -100 : 0),
+        draw: () => this.drawCow(c),
+      });
+    }
+
+    // Jogadores remotos + rebanho deles (depth sorted separadamente)
+    for (const [, rp] of this.remotePlayers) {
+      const r = rp;
+      // Vacas seguindo o jogador remoto — cada uma entra no sort individualmente
+      const hN = Math.min(r.herdCount ?? 0, 12);
+      for (let i = 0; i < hN; i++) {
+        const tCol = r.col - r.dirCol * (i + 1) * 1.1;
+        const tRow = r.row - r.dirRow * (i + 1) * 1.1;
+        const alpha = Math.max(0.45, 0.9 - i * 0.07);
+        const herdbob = r.moving ? Math.sin(this.time * 9 + i * 1.4) * 1.5 : 0;
+        items.push({
+          depth: tCol + tRow,
+          draw: () =>
+            this.drawRemoteBasedCow(tCol, tRow, r.color, alpha, herdbob),
+        });
+      }
+      items.push({
+        depth: r.col + r.row,
+        draw: () => this.drawRemotePlayer(r),
+      });
+    }
+
+    // Vacas de outros jogadores no curral
+    for (const [, batch] of this.remoteCowsInBase) {
+      for (const pos of batch.cows) {
+        const p = pos,
+          color = batch.color;
+        items.push({
+          depth: p.col + p.row - 100,
+          draw: () => this.drawRemoteBasedCow(p.col, p.row, color),
+        });
+      }
+    }
+
+    items.sort((a, b) => a.depth - b.depth);
+    for (const item of items) item.draw();
+  }
+
+  // ─── Player drawing ───────────────────────────────────────────────────────
+
+  /** Map dirCol/dirRow to the sprite direction name */
+  private getSpriteDir(dc: number, dr: number): string {
+    if (dc === 1 && dr === -1) return "north-east";
+    if (dc === 1 && dr === 0) return "east";
+    if (dc === 1 && dr === 1) return "south-east";
+    if (dc === 0 && dr === 1) return "south";
+    if (dc === -1 && dr === 1) return "south-west";
+    if (dc === -1 && dr === 0) return "west";
+    if (dc === -1 && dr === -1) return "north-west";
+    return "north";
+  }
+
+  // ─── Remote player drawing ────────────────────────────────────────────────
+
+  private drawRemotePlayer(rp: RemotePlayer) {
+    const { ctx } = this;
+    const { x, y } = this.isoToScreen(rp.col, rp.row);
+    const bob = rp.moving
+      ? Math.sin(this.time * 11 + rp.id.charCodeAt(0)) * 2
+      : 0;
+    const py = y + bob;
+
+    // Sombra
+    ctx.fillStyle = "rgba(0,0,0,0.25)";
+    ctx.beginPath();
+    ctx.ellipse(x, y + 4, 14, 6, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Tenta usar o sprite do player com tint colorido
+    const dir = this.getSpriteDir(rp.dirCol, rp.dirRow);
+    const frame = Math.floor(this.time * 8) % 4;
+    const spritePath = rp.moving
+      ? `player/run/${dir}/frame_00${frame}.png`
+      : `player/idle/${dir}.png`;
+    const img = sprites.get(spritePath);
+    const SW = 64,
+      SH = 64;
+
+    if (img) {
+      // Desenha sprite com tint usando offscreen canvas
+      const off = document.createElement("canvas");
+      off.width = SW;
+      off.height = SH;
+      const oCtx = off.getContext("2d")!;
+      oCtx.drawImage(img, 0, 0, SW, SH);
+      oCtx.globalCompositeOperation = "source-atop";
+      oCtx.globalAlpha = 0.55;
+      oCtx.fillStyle = rp.color;
+      oCtx.fillRect(0, 0, SW, SH);
+      ctx.drawImage(off, x - SW / 2, y - SH + 12, SW, SH);
+    } else {
+      // Fallback canvas colorido
+      ctx.fillStyle = rp.color;
+      ctx.fillRect(x - 9, py - 26, 18, 20);
+      ctx.fillStyle = "#f4c28a";
+      ctx.fillRect(x - 7, py - 38, 14, 14);
+      ctx.fillStyle = "#5c3010";
+      ctx.fillRect(x - 10, py - 54, 20, 18);
+      ctx.fillStyle = "#3a1a00";
+      ctx.fillRect(x - 12, py - 38, 24, 4); // aba do chapéu
+    }
+
+    // Tag com nome
+    ctx.font = "bold 11px sans-serif";
+    ctx.textAlign = "center";
+    const tw = ctx.measureText(rp.name).width;
+    ctx.fillStyle = "rgba(0,0,0,0.6)";
+    ctx.fillRect(x - tw / 2 - 4, py - 72, tw + 8, 15);
+    ctx.fillStyle = rp.color;
+    ctx.textBaseline = "top";
+    ctx.fillText(rp.name, x, py - 71);
+    ctx.textBaseline = "alphabetic";
+  }
+
+  // ─── Remote based cow ─────────────────────────────────────────────────────
+  // Vaca simples colorida representando a vaca de outro jogador no curral
+
+  private drawRemoteBasedCow(
+    col: number,
+    row: number,
+    color: string,
+    baseAlpha = 0.88,
+    bob = 0,
+  ) {
+    const { ctx } = this;
+    const { x, y: yBase } = this.isoToScreen(col, row);
+    const y = yBase + bob;
+
+    ctx.save();
+
+    // Sombra
+    ctx.fillStyle = "rgba(0,0,0,0.18)";
+    ctx.beginPath();
+    ctx.ellipse(x, y + 4, 14, 6, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Corpo colorido com borda mais escura
+    ctx.globalAlpha = baseAlpha;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.roundRect(x - 15, y - 19, 28, 15, 4);
+    ctx.fill();
+
+    // Mancha branca no corpo
+    ctx.globalAlpha = baseAlpha * 0.5;
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath();
+    ctx.ellipse(x - 3, y - 13, 5, 4, -0.3, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.globalAlpha = baseAlpha;
+
+    // Cabeça
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.roundRect(x + 8, y - 27, 11, 10, 3);
+    ctx.fill();
+
+    // Focinho
+    ctx.fillStyle = "rgba(255,255,255,0.5)";
+    ctx.beginPath();
+    ctx.ellipse(x + 15, y - 22, 4, 3, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Patas
+    ctx.fillStyle = color;
+    ctx.fillRect(x - 12, y - 5, 4, 6);
+    ctx.fillRect(x - 5, y - 5, 4, 6);
+    ctx.fillRect(x + 3, y - 5, 4, 6);
+    ctx.fillRect(x + 10, y - 5, 4, 6);
+
+    // Pequeno ícone de cor do dono (bolinha no topo)
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = color;
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(x - 14, y - 24, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  // ─── Player drawing ───────────────────────────────────────────────────────
+
+  private drawPlayer() {
+    const { ctx } = this;
+    const { x, y } = this.isoToScreen(this.player.col, this.player.row);
+
+    // ── Shadow ────────────────────────────────────────────────────────────────
+    ctx.fillStyle = "rgba(0,0,0,0.25)";
+    ctx.beginPath();
+    ctx.ellipse(x, y + 4, 14, 6, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // ── Sprite ────────────────────────────────────────────────────────────────
+    const SW = 64,
+      SH = 64; // sprite dimensions
+    const dir = this.getSpriteDir(this.player.dirCol, this.player.dirRow);
+
+    let spritePath: string;
+    if (this.player.moving) {
+      const frame = Math.floor(this.time * 8) % 4;
+      spritePath = `player/run/${dir}/frame_00${frame}.png`;
+    } else {
+      spritePath = `player/idle/${dir}.png`;
+    }
+
+    const img = sprites.get(spritePath);
+    if (img) {
+      ctx.drawImage(img, x - SW / 2, y - SH + 12, SW, SH);
+    } else {
+      // Canvas fallback while sprites load
+      const bob = this.player.moving ? Math.sin(this.time * 11) * 2 : 0;
+      const py = y + bob;
+      ctx.fillStyle = "#3a5a9f";
+      ctx.fillRect(x - 9, py - 26, 18, 20);
+      ctx.fillStyle = "#f4c28a";
+      ctx.fillRect(x - 7, py - 38, 14, 14);
+      ctx.fillStyle = "#8B4513";
+      ctx.fillRect(x - 9, py - 56, 18, 20);
+    }
+
+    // Capture range ring
+    if (!this.lasso.active) {
+      const nearest = this.nearestWanderingCow();
+      if (nearest) {
+        const d = dist(this.player, nearest);
+        const inRange = d <= CAPTURE_DIST;
+        if (d <= CAPTURE_DIST * 2) {
+          const alpha = inRange
+            ? 0.55
+            : Math.max(0, 0.2 - (d - CAPTURE_DIST) * 0.08);
+          ctx.strokeStyle = `rgba(255,215,0,${alpha})`;
+          ctx.lineWidth = inRange ? 2 : 1;
+          ctx.setLineDash([7, 4]);
+          ctx.beginPath();
+          const r = CAPTURE_DIST * (TILE_W / 2) * 0.8;
+          ctx.ellipse(x, y, r, r * 0.4, 0, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+      }
+    }
+  }
+
+  // ─── Cow drawing ──────────────────────────────────────────────────────────
+
+  private drawCow(cow: Cow) {
+    const { ctx } = this;
+    const { x, y } = this.isoToScreen(cow.col, cow.row);
+    const bob =
+      cow.state === "wandering" ? Math.sin(this.time * 5 + cow.id) * 0.8 : 0;
+    const cy = y + bob;
+    const t = cow.type;
+
+    const isTranslucent = t.renderStyle === "translucent";
+    const prevAlpha = ctx.globalAlpha;
+    if (isTranslucent)
+      ctx.globalAlpha = 0.55 + Math.sin(this.time * 2 + cow.id) * 0.1;
+
+    // Glow / cosmic halo
+    if (t.renderStyle === "glowing" || t.renderStyle === "cosmic") {
+      const pulse = 0.5 + Math.sin(this.time * 3 + cow.id) * 0.3;
+      ctx.fillStyle = t.glowColor ?? "rgba(255,215,0,0.3)";
+      ctx.beginPath();
+      ctx.ellipse(
+        x,
+        cy - 10,
+        32 + pulse * 6,
+        20 + pulse * 4,
+        0,
+        0,
+        Math.PI * 2,
+      );
+      ctx.fill();
+    }
+
+    // Shadow
+    ctx.globalAlpha = isTranslucent ? 0.1 : ctx.globalAlpha * 0.7;
+    ctx.fillStyle = "#000";
+    ctx.beginPath();
+    ctx.ellipse(x, y + 4, 15, 7, 0, 0, Math.PI * 2);
+    ctx.fill();
+    if (isTranslucent)
+      ctx.globalAlpha = 0.55 + Math.sin(this.time * 2 + cow.id) * 0.1;
+    else ctx.globalAlpha = prevAlpha;
+
+    const body = t.bodyColor;
+    const spot = t.spotColor;
+
+    // Body
+    ctx.fillStyle = body;
+    ctx.beginPath();
+    ctx.roundRect(x - 16, cy - 20, 30, 16, 4);
+    ctx.fill();
+
+    // Stripes for 'striped'
+    if (t.renderStyle === "striped") {
+      ctx.fillStyle = spot;
+      for (let i = 0; i < 4; i++) {
+        ctx.fillRect(x - 14 + i * 7, cy - 20, 3, 16);
+      }
+    } else if (t.renderStyle === "cosmic") {
+      // Star dots
+      ctx.fillStyle = "#ffffff";
+      for (let i = 0; i < 8; i++) {
+        const sx =
+          x - 14 + Math.sin(i * 1.3 + this.time * 0.5 + cow.id) * 10 + 10;
+        const sy = cy - 14 + Math.cos(i * 1.7 + this.time * 0.3 + cow.id) * 5;
+        ctx.beginPath();
+        ctx.arc(sx, sy, 1.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    } else {
+      // Normal spots
+      ctx.fillStyle = spot;
+      ctx.beginPath();
+      ctx.ellipse(x - 6, cy - 14, 5, 4, -0.3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(x + 5, cy - 11, 4, 5, 0.4, 0, Math.PI * 2);
+      ctx.fill();
+      if (t.secondaryColor) {
+        ctx.fillStyle = t.secondaryColor;
+        ctx.beginPath();
+        ctx.ellipse(x - 2, cy - 18, 4, 3, 0.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // Head
+    ctx.fillStyle = body;
+    ctx.beginPath();
+    ctx.roundRect(x + 12, cy - 22, 14, 12, 3);
+    ctx.fill();
+
+    // Eye, nose, ear
+    ctx.fillStyle = "#222";
+    ctx.fillRect(x + 21, cy - 20, 2, 2);
+    ctx.fillStyle = "#f4a0a0";
+    ctx.beginPath();
+    ctx.ellipse(x + 24, cy - 14, 3, 2, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#f4c0b0";
+    ctx.beginPath();
+    ctx.ellipse(x + 13, cy - 21, 3, 4, -0.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Legs
+    ctx.fillStyle = t.renderStyle === "cosmic" ? "#0a0820" : "#ddd";
+    for (const lx of [x - 12, x - 4, x + 4, x + 10])
+      ctx.fillRect(lx, cy - 4, 4, 8);
+
+    // Tail
+    ctx.strokeStyle = body;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x - 16, cy - 14);
+    ctx.quadraticCurveTo(x - 24, cy - 10, x - 20, cy - 4);
+    ctx.stroke();
+
+    ctx.globalAlpha = prevAlpha;
+
+    // Sparkle on fresh capture
+    if (cow.sparkTimer > 0) {
+      const pct = cow.sparkTimer / 1.5;
+      for (let i = 0; i < 6; i++) {
+        const a = (i / 6) * Math.PI * 2 + this.time * 3;
+        const r = (1 - pct) * 28;
+        const sx = x + Math.cos(a) * r;
+        const sy = cy - 10 + Math.sin(a) * r * 0.5;
+        ctx.fillStyle = `rgba(255,220,50,${pct * 0.9})`;
+        ctx.beginPath();
+        ctx.arc(sx, sy, 3 * pct, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // State / wary badge
+    ctx.textAlign = "center";
+    if (cow.state === "lassoed") {
+      ctx.fillStyle = "rgba(255,200,0,0.95)";
+      ctx.font = "bold 14px sans-serif";
+      ctx.fillText("!", x, cy - 28);
+    } else if (cow.state === "captured") {
+      ctx.fillStyle = "rgba(50,200,50,0.95)";
+      ctx.font = "14px sans-serif";
+      ctx.fillText("✓", x, cy - 28);
+    } else if (cow.state === "based") {
+      ctx.font = "11px sans-serif";
+      ctx.fillText("🏠", x, cy - 26);
+    } else if (cow.state === "wandering" && cow.type.fearDistance > 0) {
+      // Show 👀 when player is within fear range
+      const pd = dist(this.player, cow);
+      if (pd < cow.type.fearDistance) {
+        const blink = Math.sin(this.time * 6) > 0; // blink faster when closer
+        if (blink || pd > cow.type.fearDistance * 0.6) {
+          ctx.font = "12px sans-serif";
+          ctx.drawImage(this.icons.eyeIcon, x - 8, cy - 36, 16, 16);
+        }
+      }
+    }
+  }
+
+  // ─── Lasso ────────────────────────────────────────────────────────────────
+
+  private renderLasso() {
+    if (!this.lasso.active || !this.lasso.cow) return;
+    const { ctx, lasso: l } = this;
+    const ps = this.isoToScreen(this.player.col, this.player.row);
+    const cs = this.isoToScreen(l.cow!.col, l.cow!.row);
+    const t = l.phase === "throwing" ? l.throwT : 1;
+    const ex = ps.x + (cs.x - ps.x) * t;
+    const ey = ps.y - 30 + (cs.y - 20 - (ps.y - 30)) * t;
+    const swing = l.phase === "pulling" ? Math.sin(this.time * 22) * 9 : 0;
+
+    ctx.beginPath();
+    ctx.moveTo(ps.x, ps.y - 30);
+    ctx.quadraticCurveTo(
+      (ps.x + ex) / 2 + swing,
+      Math.min(ps.y, ey) - 55,
+      ex,
+      ey,
+    );
+    ctx.strokeStyle = "#8B4513";
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+
+    if (t >= 1) {
+      const ls =
+        l.phase === "pulling" ? 1 + Math.sin(this.time * 22) * 0.12 : 1;
+      ctx.strokeStyle = "#5c2e08";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.ellipse(cs.x, cs.y - 18, 12 * ls, 5 * ls, 0, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
+  // ─── Stake rendering ──────────────────────────────────────────────────────
+
+  /** Range ring + target preview shown while aiming */
+  private renderStakeAimRing() {
+    if (this.stake.phase !== "aiming") return;
+    const { ctx } = this;
+    const ps = this.isoToScreen(this.player.col, this.player.row);
+
+    // Range ellipse (isometric circle ≈ ellipse with x:y = 2:1)
+    const rx = STAKE_RANGE * (TILE_W / 2) * 0.88;
+    const ry = rx * 0.45;
+    ctx.strokeStyle = "rgb(247, 145, 13)";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([8, 5]);
+    ctx.beginPath();
+    ctx.ellipse(ps.x, ps.y, rx, ry, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Label
+    ctx.fillStyle = "rgb(255, 200, 80)";
+    ctx.font = "bold 13px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("Clique para arremessar a estaca", ps.x, ps.y - ry - 10);
+  }
+
+  /** Stake object + rope during fly / pull */
+  private renderStake() {
+    const s = this.stake;
+    if (s.phase === "idle" || s.phase === "aiming") return;
+
+    const { ctx } = this;
+    const ps = this.isoToScreen(this.player.col, this.player.row);
+
+    // Current stake screen position
+    const stakePos =
+      s.phase === "flying"
+        ? this.isoToScreen(s.flyCol, s.flyRow)
+        : this.isoToScreen(s.targetCol, s.targetRow);
+
+    // Rope arc (bezier from player to stake, arc height based on distance)
+    const midX = (ps.x + stakePos.x) / 2;
+    const midY = (ps.y + stakePos.y) / 2;
+    const arcH =
+      s.phase === "flying"
+        ? -40 - dist(this.player, { col: s.flyCol, row: s.flyRow }) * 3
+        : -20 -
+          (1 - s.pullT) *
+            dist(
+              { col: s.pullStartCol, row: s.pullStartRow },
+              { col: s.targetCol, row: s.targetRow },
+            ) *
+            3;
+
+    ctx.beginPath();
+    ctx.moveTo(ps.x, ps.y - 28);
+    ctx.quadraticCurveTo(midX, midY + arcH, stakePos.x, stakePos.y - 10);
+    ctx.strokeStyle = "#8B5A00";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Stake icon (wooden post embedded in ground)
+    const sx = stakePos.x,
+      sy = stakePos.y;
+    if (s.phase !== "flying") {
+      // Shadow
+      ctx.fillStyle = "rgba(0,0,0,0.2)";
+      ctx.beginPath();
+      ctx.ellipse(sx, sy + 2, 8, 4, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // Post
+    const postH = s.phase === "flying" ? 16 : 20;
+    ctx.fillStyle = "#6B3A0A";
+    ctx.fillRect(sx - 3, sy - postH, 6, postH);
+    // Top cap (pointy)
+    ctx.fillStyle = "#8B4513";
+    ctx.beginPath();
+    ctx.moveTo(sx - 4, sy - postH);
+    ctx.lineTo(sx, sy - postH - 7);
+    ctx.lineTo(sx + 4, sy - postH);
+    ctx.closePath();
+    ctx.fill();
+    // Rope knot
+    ctx.fillStyle = "#c8a050";
+    ctx.beginPath();
+    ctx.arc(sx, sy - postH + 4, 3, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Sparkle when just landed (pullT near 0)
+    if (s.phase === "pulling" && s.pullT < 0.15) {
+      ctx.fillStyle = "rgba(255,180,0,0.8)";
+      ctx.font = "14px sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("★", sx, sy - postH - 14);
+    }
+  }
+
+  // ─── HUD / UI ─────────────────────────────────────────────────────────────
+
+  private renderUI() {
+    const { canvas } = this;
+    const W = canvas.width,
+      H = canvas.height;
+
+    this.renderStatsPanel();
+    this.renderOnlinePanel(W, H);
+    this.renderBookButton(W);
+    this.renderChat(W, H);
+
+    // ── Lasso minigame or fail overlay ───────────────────────────────────────
+    if (this.lasso.active && this.lasso.phase === "pulling")
+      this.renderMinigame();
+    else if (this.lasso.active && this.lasso.phase === "fail") {
+      this.drawPanel(W / 2 - 140, H / 2 - 38, 280, 80, 2);
+      this.ctx.fillStyle = "#FF5533";
+      this.ctx.font = "bold 26px sans-serif";
+      this.ctx.textAlign = "center";
+      this.ctx.fillText("Escapou! 💨", W / 2, H / 2 + 8);
+    }
+
+    this.renderContextHint(W, H);
+    this.renderMobileControls();
+
+    // Dicas de teclado (desktop)
+    if (W > 720) {
+      this.drawPanel(W - 180, 90, 170, 76, 3);
+      this.ctx.fillStyle = "#C8A870";
+      this.ctx.font = "11px sans-serif";
+      this.ctx.textAlign = "center";
+      this.ctx.fillText("WASD / Setas = mover", W - 95, 118);
+      this.ctx.fillText("E / Espaço = ação   B = Livro", W - 95, 136);
+      this.ctx.fillText("Q = Estaca (cruzar rio)", W - 95, 154);
+    }
+  }
+
+  // ── Painel de stats (top-left) ────────────────────────────────────────────
+
+  private renderStatsPanel() {
+    const { ctx } = this;
+
+    if (this.statsMinimized) {
+      // ── Versão compacta ──
+      this.drawPanel(6, 6, 136, 38, 0);
+
+      // Dot de cor do jogador local
+      ctx.fillStyle = this.myColor;
+      ctx.beginPath();
+      ctx.arc(20, 25, 5, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.textAlign = "left";
+      ctx.font = "bold 12px sans-serif";
+      ctx.fillStyle = "#FFE0A0";
+      ctx.fillText(
+        `🐄 ${this.herdCows().length}  🏠 ${this.basedCount}`,
+        32,
+        29,
+      );
+
+      // Botão expandir
+      this.drawPixelBtn(110, 9, 22, 22, "normal");
+      ctx.fillStyle = "#FFD700";
+      ctx.font = "bold 11px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("▶", 121, 20);
+      ctx.textBaseline = "alphabetic";
+    } else {
+      // ── Versão expandida ──
+      const PW = 210,
+        PH = 132;
+      this.drawPanel(6, 6, PW, PH, 0);
+
+      // Cabeçalho: cor + nome do jogador
+      ctx.fillStyle = this.myColor;
+      ctx.beginPath();
+      ctx.roundRect(12, 12, 12, 12, 2);
+      ctx.fill();
+      ctx.textAlign = "left";
+      ctx.font = "bold 13px sans-serif";
+      ctx.fillStyle = "#FFE0A0";
+      ctx.fillText(this.myName, 30, 23);
+
+      // Divisor
+      ctx.strokeStyle = "rgba(200,160,80,0.4)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(12, 30);
+      ctx.lineTo(PW - 6, 30);
+      ctx.stroke();
+
+      // Stats
+      const rows: [string, string][] = [
+        ["🐄  Rebanho:", `${this.herdCows().length}`],
+        ["🏠  Na base:", `${this.basedCount}`],
+        [
+          "🌾  Vagando:",
+          `${this.cows.filter((c) => c.state === "wandering" || c.state === "fleeing").length}`,
+        ],
+        ["📖  Descob.:", `${this.discovered.size} / ${COW_TYPES.length}`],
+      ];
+
+      let ry = 48;
+      for (const [label, value] of rows) {
+        ctx.font = "12px sans-serif";
+        ctx.fillStyle = "#C8A870";
+        ctx.textAlign = "left";
+        ctx.fillText(label, 14, ry);
+        ctx.font = "bold 12px sans-serif";
+        ctx.fillStyle = "#FFE0A0";
+        ctx.textAlign = "right";
+        ctx.fillText(value, PW - 10, ry);
+        ry += 20;
+      }
+
+      // Botão recolher
+      this.drawPixelBtn(PW - 20, 9, 22, 22, "normal");
+      ctx.fillStyle = "#FFD700";
+      ctx.font = "bold 11px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("◀", PW - 9, 20);
+      ctx.textBaseline = "alphabetic";
+    }
+  }
+
+  // ── Painel de jogadores online (top-right, separado) ─────────────────────
+
+  private renderOnlinePanel(W: number, _H: number) {
+    const { ctx } = this;
+    const total = this.remotePlayers.size + 1;
+
+    // Só aparece quando há alguém conectado
+    if (this.remotePlayers.size === 0) return;
+
+    // Em mobile ocupa espaço demais — esconde se tela muito pequena
+    if (W < 480) return;
+
+    // Lista: eu primeiro, depois remotos
+    type Entry = { color: string; name: string; isMe: boolean };
+    const entries: Entry[] = [
+      { color: this.myColor, name: this.myName + " (você)", isMe: true },
+      ...Array.from(this.remotePlayers.values()).map((rp) => ({
+        color: rp.color,
+        name: rp.name,
+        isMe: false,
+      })),
+    ];
+
+    const PW = 170;
+    const rowH = 22;
+    // Limita a 6 entradas visíveis para não cobrir o chat
+    const visibleEntries = entries.slice(0, 6);
+    const PH = 28 + visibleEntries.length * rowH + 8;
+
+    // Lado esquerdo, abaixo do painel de stats
+    const PX = 6;
+    const PY = this.statsMinimized ? 50 : 144;
+
+    this.drawPanel(PX, PY, PW, PH, 1);
+
+    // Cabeçalho
+    ctx.font = "bold 11px sans-serif";
+    ctx.textAlign = "left";
+    ctx.fillStyle = "#55FF99";
+    ctx.fillText(
+      `● Online  —  ${total} jogador${total > 1 ? "es" : ""}`,
+      PX + 10,
+      PY + 17,
+    );
+
+    // Divisor
+    ctx.strokeStyle = "rgba(200,160,80,0.35)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(PX + 8, PY + 22);
+    ctx.lineTo(PX + PW - 8, PY + 22);
+    ctx.stroke();
+
+    // Linhas de jogadores
+    let ey = PY + 22 + rowH - 4;
+    for (const e of visibleEntries) {
+      // Dot de cor
+      ctx.fillStyle = e.color;
+      ctx.beginPath();
+      ctx.arc(PX + 16, ey - 5, 5, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Nome
+      ctx.font = e.isMe ? "bold 11px sans-serif" : "11px sans-serif";
+      ctx.fillStyle = e.isMe ? "#FFE0A0" : "#C8A870";
+      ctx.textAlign = "left";
+
+      // Trunca nome se necessário
+      let name = e.name;
+      while (ctx.measureText(name).width > PW - 36 && name.length > 3) {
+        name = name.slice(0, -1);
+      }
+      if (name !== e.name) name += "…";
+
+      ctx.fillText(name, PX + 28, ey);
+      ey += rowH;
+    }
+  }
+
+  // ── Chat (bottom-left) ────────────────────────────────────────────────────
+
+  private renderChat(W: number, H: number) {
+    const { ctx } = this;
+    const now = Date.now();
+
+    // Mensagens recentes (últimos 12s, máx 6)
+    const recent = this.chatMessages
+      .filter((m) => now - m.time < 12000)
+      .slice(-6);
+
+    if (recent.length === 0 && !this.chatOpen) {
+      // Dica sutil
+      ctx.save();
+      ctx.globalAlpha = 0.4;
+      ctx.font = "11px sans-serif";
+      ctx.fillStyle = "#C8A870";
+      ctx.textAlign = "left";
+      // Fica logo acima do painel de chat vazio (H-157)
+      ctx.fillText("T = Chat", 14, H - 157);
+      ctx.restore();
+      return;
+    }
+
+    const PW = 272;
+    const lineH = 18;
+    const padV = 8;
+    const panelH = recent.length * lineH + padV * 2;
+    // Âncora: bottom da área de chat = H-165 (acima do joystick em H-142 e do input em H-160)
+    const panelBottom = this.chatOpen ? H - 165 : H - 155;
+    const panelY = panelBottom - panelH;
+
+    this.drawPanel(6, panelY, PW, panelH, 0);
+
+    ctx.save();
+    let ty = panelY + padV + 12;
+    for (const msg of recent) {
+      const age = (now - msg.time) / 12000;
+      const alpha = Math.max(0.35, 1 - age * 0.7);
+
+      ctx.globalAlpha = alpha;
+      ctx.font = "bold 11px sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillStyle = msg.color;
+      const nameLabel = msg.name + ": ";
+      const nameW = ctx.measureText(nameLabel).width;
+      ctx.fillText(nameLabel, 14, ty);
+
+      ctx.font = "11px sans-serif";
+      ctx.fillStyle = "#FFE0A0";
+      let text = msg.text;
+      const maxW = PW - nameW - 20;
+      while (ctx.measureText(text).width > maxW && text.length > 3) {
+        text = text.slice(0, -1);
+      }
+      if (text !== msg.text) text += "…";
+      ctx.fillText(text, 14 + nameW, ty);
+
+      ty += lineH;
+    }
+    ctx.restore();
+
+    // Indicador quando input está aberto (logo acima do painel de mensagens)
+    if (this.chatOpen) {
+      ctx.save();
+      ctx.globalAlpha = 0.75;
+      ctx.font = "bold 10px sans-serif";
+      ctx.fillStyle = "#FFD700";
+      ctx.textAlign = "left";
+      ctx.fillText("Enter = enviar  •  Esc = fechar", 14, panelY - 5);
+      ctx.restore();
+    }
+  }
+
+  // ── Botão do livro (top-right) ────────────────────────────────────────────
+
+  private renderBookButton(W: number) {
+    const { ctx } = this;
+    const bookCX = W - 50,
+      bookCY = 50;
+    this.drawPixelBtn(bookCX - 34, bookCY - 34, 68, 68, "normal");
+    ctx.drawImage(this.icons.bookIcon, bookCX - 16, bookCY - 16, 32, 32);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#FFD700";
+    ctx.font = "bold 9px sans-serif";
+    ctx.fillText("LIVRO", bookCX, bookCY + 24);
+  }
+
+  // ── Hint contextual ───────────────────────────────────────────────────────
+
+  private renderContextHint(W: number, H: number) {
+    const { ctx } = this;
+    if (this.lasso.active) return;
+
+    const nearest = this.nearestWanderingCow();
+    const atBase = this.isAtBase(),
+      hasHerd = this.herdCows().length > 0;
+    let hint = "";
+    const isMobile = W < 600;
+    if (atBase && hasHerd)
+      hint = isMobile
+        ? "Botão: Depositar na base!"
+        : "Pressione E / botão para DEPOSITAR na base!";
+    else if (nearest && dist(this.player, nearest) <= CAPTURE_DIST)
+      hint = isMobile
+        ? "Botão: Laçar vaca!"
+        : "Pressione E / botão para LAÇAR a vaca!";
+
+    if (!hint) return;
+
+    ctx.font = `bold ${isMobile ? 14 : 13}px sans-serif`;
+    ctx.textAlign = "center";
+    const tw = ctx.measureText(hint).width;
+    const hpw = Math.min(tw + 48, W - 20);
+    this.drawPixelBtn(W / 2 - hpw / 2, H - 120, hpw, 40, "normal", true);
+    ctx.fillStyle = "#FFD700";
+    ctx.fillText(hint, W / 2, H - 94);
+  }
+
+  private renderMinigame() {
+    const { ctx, canvas, lasso } = this;
+    const W = canvas.width,
+      H = canvas.height;
+    const needed = lasso.cow?.type.clicksNeeded ?? 15;
+    const prog = lasso.clickCount / needed;
+    const timeR = lasso.timeLeft / LASSO_TIME_LIMIT;
+    const flash = lasso.flashTimer > 0;
+    const bw = 296,
+      bh = 148;
+    const bx = W / 2 - bw / 2,
+      by = H / 2 - bh / 2 - 20;
+
+    // Panel (9-slice, style 2 = lighter variant; flash = style variant 2 tint)
+    this.drawPanel(bx, by, bw, bh, flash ? 2 : 0);
+
+    // Title
+    ctx.fillStyle = flash ? "#FF8800" : "#FFD700";
+    ctx.font = "bold 20px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("🤠  PUXE!  PUXE!  PUXE!", W / 2, by + 50);
+
+    // Progress bar
+    const barX = bx + 28,
+      barY = by + 62,
+      barW = bw - 56,
+      barH = 20;
+    ctx.fillStyle = "#1a0e04";
+    ctx.fillRect(barX, barY, barW, barH);
+    ctx.fillStyle = prog > 0.7 ? "#4caf50" : prog > 0.4 ? "#8bc34a" : "#cddc39";
+    ctx.fillRect(barX, barY, barW * prog, barH);
+    ctx.strokeStyle = "#8B5A00";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(barX, barY, barW, barH);
+
+    // Time bar
+    const tbY = barY + 28;
+    ctx.fillStyle = "#1a0e04";
+    ctx.fillRect(barX, tbY, barW, 10);
+    ctx.fillStyle = timeR > 0.4 ? "#ff9800" : "#f44336";
+    ctx.fillRect(barX, tbY, barW * timeR, 10);
+    ctx.strokeStyle = "#5a3000";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(barX, tbY, barW, 10);
+
+    // Counter
+    ctx.fillStyle = "#C8A870";
+    ctx.font = "12px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(`${lasso.clickCount} / ${needed} puxadas`, W / 2, by + 120);
+
+    // Mobile big tap target
+    if (canvas.width < 700) {
+      const btnState = flash ? "active" : "pressed";
+      this.drawPixelBtn(W / 2 - 62, H - 224, 124, 52, btnState, true);
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold 16px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("PUXAR! 💪", W / 2, H - 198);
+      ctx.textBaseline = "alphabetic";
+    }
+  }
+
+  private renderMobileControls() {
+    const { ctx, canvas } = this;
+    const W = canvas.width,
+      H = canvas.height;
+    const jx = 88,
+      jy = H - 90;
+
+    // ── Virtual joystick (craftpix palette: brown tones) ──────────────────────
+    ctx.fillStyle = "rgba(60,30,8,0.55)";
+    ctx.strokeStyle = "#a87040";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(jx, jy, 52, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(jx, jy, 52, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.strokeStyle = "rgba(200,150,60,0.4)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(jx, jy, 36, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.fillStyle = "rgba(220,170,80,0.55)";
+    ctx.font = "14px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("▲", jx, jy - 32);
+    ctx.fillText("▼", jx, jy + 32);
+    ctx.fillText("◀", jx - 32, jy);
+    ctx.fillText("▶", jx + 32, jy);
+    const jtx = jx + this.joystick.dx * 26,
+      jty = jy + this.joystick.dy * 26;
+    ctx.fillStyle = "rgba(200,140,50,0.75)";
+    ctx.strokeStyle = "#c89040";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(jtx, jty, 24, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(jtx, jty, 24, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.textBaseline = "alphabetic";
+
+    // ── Action button (bottom-right) ──────────────────────────────────────────
+    const ax = W - 80,
+      ay = H - 80;
+    const nearest = this.nearestWanderingCow();
+    const inRange = nearest && dist(this.player, nearest) <= CAPTURE_DIST;
+    const atBase = this.isAtBase(),
+      hasHerd = this.herdCows().length > 0;
+    let btnState: "normal" | "active" | "pressed" = "normal";
+    let icon = this.icons.spaceKey;
+    let label = "E";
+
+    if (this.lasso.active && this.lasso.phase === "pulling") {
+      btnState = this.lasso.flashTimer > 0 ? "pressed" : "active";
+      icon = this.icons.pull;
+    } else if (atBase && hasHerd) {
+      btnState = "active";
+      icon = this.icons.base;
+    } else if (inRange) {
+      btnState = "active";
+      icon = this.icons.cowboy;
+    }
+    this.drawPixelBtn(ax - 30, ay - 30, 60, 60, btnState);
+    ctx.drawImage(icon, ax - 16, ay - 16, 32, 32);
+
+    // ── Stake button (above action button) ────────────────────────────────────
+    const stakeX = W - 80,
+      stakeY = H - 170;
+    const stakeActive = this.stake.phase !== "idle";
+    this.drawPixelBtn(
+      stakeX - 30,
+      stakeY - 30,
+      60,
+      60,
+      stakeActive ? "active" : "normal",
+    );
+    ctx.drawImage(this.icons.stakeIcon, stakeX - 16, stakeY - 16, 32, 32);
+
+    // ── Chat button (above stake button) ─────────────────────────────────────
+    const chatBtnX = W - 80,
+      chatBtnY = H - 260;
+    this.drawPixelBtn(
+      chatBtnX - 30,
+      chatBtnY - 24,
+      60,
+      48,
+      this.chatOpen ? "active" : "normal",
+    );
+    ctx.fillStyle = "#FFD700";
+    ctx.font = "18px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("💬", chatBtnX, chatBtnY - 8);
+    ctx.font = "bold 9px sans-serif";
+    ctx.fillStyle = "#C8A870";
+    ctx.fillText("CHAT", chatBtnX, chatBtnY + 10);
+    ctx.textBaseline = "alphabetic";
+  }
+
+  // ─── Cowboy Book ──────────────────────────────────────────────────────────
+
+  private renderBook() {
+    const { ctx, canvas } = this;
+    const W = canvas.width,
+      H = canvas.height;
+    const BW = Math.min(W - 32, 500),
+      BH = Math.min(H - 32, 620);
+    const BX = (W - BW) / 2,
+      BY = (H - BH) / 2;
+
+    // Backdrop
+    ctx.fillStyle = "rgba(0,0,0,0.78)";
+    ctx.fillRect(0, 0, W, H);
+
+    // Book panel — craftpix 9-slice (style 1)
+    this.drawPanel(BX, BY, BW, BH, 1);
+
+    // Inner parchment page
+    ctx.fillStyle = "#f2e8cc";
+    ctx.fillRect(BX + 26, BY + 37, BW - 50, BH - 74);
+
+    // Title
+    ctx.fillStyle = "#5c2e08";
+    ctx.font = "bold 20px serif";
+    ctx.textAlign = "center";
+    ctx.fillText("📖  Livro do Cowboy", BX + BW / 2, BY + 62);
+    ctx.fillStyle = "#887050";
+    ctx.font = "13px serif";
+    ctx.fillText(
+      `Descobertas: ${this.discovered.size} / ${COW_TYPES.length}`,
+      BX + BW / 2,
+      BY + 80,
+    );
+
+    // Divider
+    ctx.strokeStyle = "#c8a060";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(BX + 36, BY + 88);
+    ctx.lineTo(BX + BW - 36, BY + 88);
+    ctx.stroke();
+
+    // Close button (pixel art button from Buttons.png)
+    const closeBtnX = BX + BW - 54,
+      closeBtnY = BY + 8;
+    this.drawPixelBtn(closeBtnX, closeBtnY, 48, 40, "pressed");
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 14px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("✕", closeBtnX + 24, closeBtnY + 20);
+    ctx.textBaseline = "alphabetic";
+
+    // Entries grid (2 columns)
+    const cols = BW > 420 ? 2 : 1;
+    const colW = (BW - 40) / cols;
+    const entryH = 80;
+    const startY = BY + 86;
+    const maxVisible = Math.floor((BH - 100) / entryH);
+
+    COW_TYPES.forEach((t, i) => {
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      if (row >= maxVisible) return;
+
+      const ex = BX + 20 + col * colW;
+      const ey = startY + row * entryH;
+      const discovered = this.discovered.has(t.id);
+      const count = this.capturedByType.get(t.id) ?? 0;
+
+      // Entry bg
+      ctx.fillStyle = discovered ? "rgba(255,230,180,0.5)" : "rgba(0,0,0,0.06)";
+      ctx.beginPath();
+      ctx.roundRect(ex, ey, colW - 8, entryH - 6, 8);
+      ctx.fill();
+
+      // Cow mini-preview (40x40 area)
+      const previewX = ex + 28,
+        previewY = ey + 30;
+      if (discovered) {
+        ctx.save();
+        ctx.translate(previewX, previewY);
+        ctx.scale(0.45, 0.45);
+        this.drawCowAt(0, 0, t);
+        ctx.restore();
+      } else {
+        // Silhouette
+        ctx.fillStyle = "rgba(0,0,0,0.25)";
+        ctx.beginPath();
+        ctx.roundRect(-16 * 0.45, -20 * 0.45, 30 * 0.45, 28 * 0.45, 3);
+        ctx.fill();
+        ctx.fillStyle = "#bbb";
+        ctx.font = "bold 18px sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("?", previewX, previewY - 5);
+        ctx.textBaseline = "alphabetic";
+      }
+
+      // Name + rarity
+      const tx = ex + 60,
+        ty2 = ey + 20;
+      ctx.textAlign = "left";
+      ctx.fillStyle = discovered ? "#3a1a00" : "#999";
+      ctx.font = `bold 13px sans-serif`;
+      ctx.fillText(discovered ? t.name : "???", tx, ty2);
+
+      // Rarity badge
+      const rarityColor = RARITY_COLORS[t.rarity] ?? "#aaa";
+      const rarityLabel = RARITY_LABELS[t.rarity] ?? t.rarity;
+      ctx.fillStyle = rarityColor + "33"; // 20% alpha bg
+      const badgeW = ctx.measureText(rarityLabel).width + 10;
+      ctx.beginPath();
+      ctx.roundRect(tx, ty2 + 4, badgeW, 16, 4);
+      ctx.fill();
+      ctx.fillStyle = rarityColor;
+      ctx.font = "10px sans-serif";
+      ctx.fillText(rarityLabel, tx + 5, ty2 + 15);
+
+      // Description or "???"
+      ctx.fillStyle = discovered ? "#5c3010" : "#bbb";
+      ctx.font = "10px serif";
+      const desc = discovered
+        ? t.description.length > 60
+          ? t.description.slice(0, 58) + "…"
+          : t.description
+        : "Não descoberta ainda.";
+      ctx.fillText(desc, tx, ty2 + 36);
+
+      // Count
+      if (discovered) {
+        ctx.fillStyle = "#888";
+        ctx.font = "10px sans-serif";
+        ctx.fillText(`Capturadas: ${count}`, tx, ty2 + 52);
+      }
+    });
+  }
+
+  // Draws a cow centered at (0,0) — used by book preview (call inside a scaled ctx.save/restore)
+  private drawCowAt(x: number, y: number, t: CowType) {
+    const { ctx } = this;
+    const body = t.bodyColor,
+      spot = t.spotColor;
+    ctx.fillStyle = body;
+    ctx.beginPath();
+    ctx.roundRect(x - 16, y - 20, 30, 16, 4);
+    ctx.fill();
+    if (t.renderStyle === "striped") {
+      ctx.fillStyle = spot;
+      for (let i = 0; i < 4; i++) ctx.fillRect(x - 14 + i * 7, y - 20, 3, 16);
+    } else {
+      ctx.fillStyle = spot;
+      ctx.beginPath();
+      ctx.ellipse(x - 5, y - 13, 5, 4, -0.3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(x + 5, y - 10, 4, 5, 0.4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.fillStyle = body;
+    ctx.beginPath();
+    ctx.roundRect(x + 12, y - 22, 14, 12, 3);
+    ctx.fill();
+    ctx.fillStyle = "#222";
+    ctx.fillRect(x + 21, y - 20, 2, 2);
+    ctx.fillStyle = "#ddd";
+    for (const lx of [x - 12, x - 4, x + 4, x + 10])
+      ctx.fillRect(lx, y - 4, 4, 8);
+  }
+}
