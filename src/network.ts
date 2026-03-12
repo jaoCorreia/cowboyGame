@@ -90,8 +90,8 @@ export class Network {
     this.ws.send(JSON.stringify({ type: 'chat', text }));
   }
 
-  sendSave(basedCount: number, discovered: string[], capturedByType: Record<string, number>, basedCowTypes: string[]) {
+  sendSave(basedCount: number, discovered: string[], capturedByType: Record<string, number>, basedCowTypes: string[], coins: number, inventory: Record<string, number>) {
     if (!this.ready || !this.ws) return;
-    this.ws.send(JSON.stringify({ type: 'save', basedCount, discovered, capturedByType, basedCowTypes }));
+    this.ws.send(JSON.stringify({ type: 'save', basedCount, discovered, capturedByType, basedCowTypes, coins, inventory }));
   }
 }

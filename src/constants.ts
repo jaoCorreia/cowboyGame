@@ -30,6 +30,19 @@ export const STAKE_RANGE       = 11;   // max throw distance in tiles
 export const STAKE_FLY_SPEED   = 18;   // tiles/sec during throw arc
 export const STAKE_PULL_SPEED  = 10;   // tiles/sec pulling player
 
+// ─── Vendedor ─────────────────────────────────────────────────────────────────
+export const VENDOR_COL = 11;
+export const VENDOR_ROW = 5;
+export const VENDOR_INTERACT_DIST = 2.5;
+
+export const COW_SELL_PRICES: Record<string, number> = {
+  comum:      10,
+  incomum:    30,
+  rara:       80,
+  super_rara: 200,
+  lendaria:   500,
+};
+
 export const RARITY_COLORS: Record<string, string> = {
   comum:      '#9e9e9e',
   incomum:    '#4caf50',

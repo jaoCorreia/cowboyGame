@@ -8,6 +8,8 @@ export interface UserData {
   discovered: string[];
   capturedByType: Record<string, number>;
   basedCows: string[]; // IDs dos tipos de vaca na base
+  coins: number;
+  inventory: Record<string, number>; // itemId → level
 }
 
 const TOKEN_KEY = "cowboy_token";
@@ -182,12 +184,14 @@ export async function saveGameState(
   discovered: string[],
   capturedByType: Record<string, number>,
   basedCowTypes: string[],
+  coins: number,
+  inventory: Record<string, number>,
 ): Promise<void> {
   try {
     await fetch("/auth/save", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token, basedCount, discovered, capturedByType, basedCowTypes }),
+      body: JSON.stringify({ token, basedCount, discovered, capturedByType, basedCowTypes, coins, inventory }),
       keepalive: true, // garante entrega mesmo se a página fechar durante o request
     });
   } catch {

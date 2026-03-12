@@ -22,6 +22,10 @@ import {
   STAKE_RANGE,
   STAKE_FLY_SPEED,
   STAKE_PULL_SPEED,
+  VENDOR_COL,
+  VENDOR_ROW,
+  VENDOR_INTERACT_DIST,
+  COW_SELL_PRICES,
 } from "./constants";
 
 /** Posição isométrica do slot de curral pelo índice do usuário (mesma fórmula do servidor). */
@@ -36,6 +40,7 @@ import { type CowType, COW_TYPES, randomCowType } from "./cowTypes";
 import { sprites } from "./sprites";
 import { Network, type RemotePlayer, type ChatMessage } from "./network";
 import { type UserData, saveGameState } from "./auth";
+import { type GameItem, SHOP_ITEMS, itemNextPrice } from "./items";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -182,9 +187,51 @@ export class Game {
 
   // Cowboy Book
   private bookOpen = false;
+  private bookPage = 0; // page index currently displayed
+  private bookPageTarget = 0; // page we are flipping towards
+  private bookPageAnimT = 1; // 0 = flip in progress, 1 = settled
+  private bookPageAnimDir = 1; // +1 = forward, -1 = backward
+  private chatHistoryScroll = 0; // msgs scrolled up from bottom (0 = at bottom)
   private statsMinimized = false;
   private discovered = new Set<string>();
   private capturedByType = new Map<string, number>();
+
+  // Moedas, Inventário e Loja
+  private coins = 0;
+  private inventory = new Map<string, number>(); // itemId → level
+  private shopOpen = false;
+  private shopTab: "sell" | "buy" = "sell";
+  private shopSellButtons: Array<{
+    cow: Cow;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+  }> = [];
+  private shopSellBasedButtons: Array<{
+    cow: Cow;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+  }> = [];
+  private shopSellAllHerdBtn = { x: 0, y: 0, w: 0, h: 0 };
+  private shopSellAllBasedBtn = { x: 0, y: 0, w: 0, h: 0 };
+  private shopBuyButtons: Array<{
+    item: GameItem;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+  }> = [];
+  private shopTabBtns: Array<{
+    tab: "sell" | "buy";
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+  }> = [];
+  private shopCloseBtn = { x: 0, y: 0, r: 0 };
 
   // Stake (grappling hook)
   private stake: StakeData = {
@@ -217,6 +264,13 @@ export class Game {
       this.basedCount = userData.basedCows?.length ?? userData.basedCount;
       this.discovered = new Set(userData.discovered);
       this.capturedByType = new Map(Object.entries(userData.capturedByType));
+      // Coins: server é a fonte de verdade; localStorage é fallback se o server retornar 0
+      const serverCoins = userData.coins ?? 0;
+      const localCoins = Number(
+        localStorage.getItem(`cowboy_coins_${userData.username}`) ?? "0",
+      );
+      this.coins = serverCoins > 0 ? serverCoins : localCoins;
+      this.inventory = new Map(Object.entries(userData.inventory ?? {}));
     }
     this.cows = Array.from({ length: COW_COUNT }, (_, i) =>
       spawnCow(i, this.map),
@@ -273,6 +327,7 @@ export class Game {
     this.setupInput();
     this.resize();
     window.addEventListener("resize", () => this.resize());
+    this.preloadPlayerSprites();
 
     if (!this.isPreview) {
       // Rede multiplayer
@@ -331,6 +386,8 @@ export class Game {
             .filter((c) => c.state === "based")
             .sort((a, b) => a.herdIndex - b.herdIndex)
             .map((c) => c.type.id),
+          coins: this.coins,
+          inventory: Object.fromEntries(this.inventory),
         });
         navigator.sendBeacon(
           "/auth/save",
@@ -379,7 +436,7 @@ export class Game {
       if (e.key === "Enter") {
         const text = input.value.trim();
         if (text) this.network?.sendChat(text);
-        this.closeChatInput();
+        input.value = "";
       } else if (e.key === "Escape") {
         this.closeChatInput();
       }
@@ -392,10 +449,9 @@ export class Game {
   private openChatInput() {
     if (!this.chatInput) return;
     this.chatOpen = true;
-    // Fica acima do joystick (top em H-142) e do painel de chat
-    this.chatInput.style.bottom = "160px";
+    this.chatInput.style.bottom = "155px";
     this.chatInput.style.left = "10px";
-    this.chatInput.style.width = "260px";
+    this.chatInput.style.width = "300px";
     this.chatInput.style.display = "block";
     this.chatInput.value = "";
     this.chatInput.focus();
@@ -407,6 +463,25 @@ export class Game {
     this.chatInput.style.display = "none";
   }
 
+  private preloadPlayerSprites() {
+    const dirs = [
+      "north",
+      "north-east",
+      "east",
+      "south-east",
+      "south",
+      "south-west",
+      "west",
+      "north-west",
+    ];
+    for (const dir of dirs) {
+      sprites.get(`player/idle/${dir}.png`);
+      for (let f = 0; f < 4; f++) {
+        sprites.get(`player/run/${dir}/frame_00${f}.png`);
+      }
+    }
+  }
+
   private setupInput() {
     window.addEventListener("keydown", (e) => {
       if (this.isPreview || this.chatOpen) return;
@@ -414,12 +489,29 @@ export class Game {
       if (e.key === " " || e.key.toLowerCase() === "e") this.handleAction();
       if (e.key.toLowerCase() === "b") this.toggleBook();
       if (e.key.toLowerCase() === "q") this.toggleStakeAim();
+      // Book page navigation with arrow keys
+      if (this.bookOpen) {
+        if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+          this.bookFlipPage(1);
+          e.preventDefault();
+          return;
+        }
+        if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+          this.bookFlipPage(-1);
+          e.preventDefault();
+          return;
+        }
+      }
       if (e.key.toLowerCase() === "t") {
         this.openChatInput();
         e.preventDefault();
         return;
       }
       if (e.key === "Escape") {
+        if (this.shopOpen) {
+          this.shopOpen = false;
+          return;
+        }
         if (this.stake.phase === "aiming") this.stake.phase = "idle";
         else this.toggleBook();
       }
@@ -436,6 +528,23 @@ export class Game {
     this.canvas.addEventListener("pointerup", (e) => {
       if (!this.isPreview) this.onPointerUp(e);
     });
+    this.canvas.addEventListener(
+      "wheel",
+      (e) => {
+        if (this.bookOpen) {
+          if (e.deltaY > 0) this.bookFlipPage(1);
+          else if (e.deltaY < 0) this.bookFlipPage(-1);
+          e.preventDefault();
+        } else if (this.chatOpen) {
+          this.chatHistoryScroll = Math.max(
+            0,
+            this.chatHistoryScroll - Math.sign(e.deltaY),
+          );
+          e.preventDefault();
+        }
+      },
+      { passive: false },
+    );
   }
 
   private onPointerDown(e: PointerEvent) {
@@ -459,16 +568,118 @@ export class Game {
       return;
     }
 
+    // Shop interaction
+    if (this.shopOpen) {
+      // Close button
+      if (
+        Math.hypot(x - this.shopCloseBtn.x, y - this.shopCloseBtn.y) <
+        this.shopCloseBtn.r + 6
+      ) {
+        this.shopOpen = false;
+        return;
+      }
+      // Tab buttons
+      for (const btn of this.shopTabBtns) {
+        if (
+          x >= btn.x &&
+          x <= btn.x + btn.w &&
+          y >= btn.y &&
+          y <= btn.y + btn.h
+        ) {
+          this.shopTab = btn.tab;
+          return;
+        }
+      }
+      if (this.shopTab === "sell") {
+        for (const btn of this.shopSellButtons) {
+          if (
+            x >= btn.x &&
+            x <= btn.x + btn.w &&
+            y >= btn.y &&
+            y <= btn.y + btn.h
+          ) {
+            this.sellCow(btn.cow);
+            return;
+          }
+        }
+        const sa = this.shopSellAllHerdBtn;
+        if (
+          sa.w > 0 &&
+          x >= sa.x &&
+          x <= sa.x + sa.w &&
+          y >= sa.y &&
+          y <= sa.y + sa.h
+        ) {
+          this.sellAllCows();
+          return;
+        }
+        for (const btn of this.shopSellBasedButtons) {
+          if (
+            x >= btn.x &&
+            x <= btn.x + btn.w &&
+            y >= btn.y &&
+            y <= btn.y + btn.h
+          ) {
+            this.sellBasedCow(btn.cow);
+            return;
+          }
+        }
+        const sb = this.shopSellAllBasedBtn;
+        if (
+          sb.w > 0 &&
+          x >= sb.x &&
+          x <= sb.x + sb.w &&
+          y >= sb.y &&
+          y <= sb.y + sb.h
+        ) {
+          this.sellAllBasedCows();
+          return;
+        }
+      } else {
+        for (const btn of this.shopBuyButtons) {
+          if (
+            x >= btn.x &&
+            x <= btn.x + btn.w &&
+            y >= btn.y &&
+            y <= btn.y + btn.h
+          ) {
+            this.buyItem(btn.item);
+            return;
+          }
+        }
+      }
+      return; // swallow input while shop is open
+    }
+
     // Book close button — match the rendered close-btn centre exactly
     if (this.bookOpen) {
       const BW = Math.min(W - 32, 500),
         BH = Math.min(H - 32, 620);
       const BX = (W - BW) / 2,
         BY = (H - BH) / 2;
-      // Close btn drawn at (BX+BW-54, BY+8, 48, 40) → centre (BX+BW-30, BY+28)
       const closeCX = BX + BW - 30,
         closeCY = BY + 28;
       if (Math.hypot(x - closeCX, y - closeCY) < 28) {
+        this.bookOpen = false;
+        return;
+      }
+      // Prev / Next nav buttons (bottom centre of parchment)
+      const parchX = BX + 26,
+        parchY = BY + 37;
+      const parchH = BH - 74;
+      const navY = parchY + parchH - 28;
+      const prevCX = BX + BW / 2 - 70;
+      const nextCX = BX + BW / 2 + 70;
+      if (Math.hypot(x - prevCX, y - navY) < 28) {
+        this.bookFlipPage(-1);
+        return;
+      }
+      if (Math.hypot(x - nextCX, y - navY) < 28) {
+        this.bookFlipPage(1);
+        return;
+      }
+      // Click outside panel closes book
+      if (x < BX || x > BX + BW || y < BY || y > BY + BH) {
         this.bookOpen = false;
         return;
       }
@@ -540,7 +751,7 @@ export class Game {
       const s = this.isoToScreen(cow.col, cow.row);
       if (
         Math.hypot(x - s.x, y - (s.y - 12)) < 34 &&
-        dist(this.player, cow) <= CAPTURE_DIST
+        dist(this.player, cow) <= this.effectiveCaptureRange
       ) {
         this.startLasso(cow);
         return;
@@ -569,6 +780,10 @@ export class Game {
   }
 
   private handleAction() {
+    if (this.shopOpen) {
+      this.shopOpen = false;
+      return;
+    }
     if (this.bookOpen) return;
     if (this.lasso.active && this.lasso.phase === "pulling") {
       this.lasso.clickCount++;
@@ -576,16 +791,38 @@ export class Game {
       return;
     }
     if (this.lasso.active) return;
+    if (this.isAtVendor()) {
+      this.shopOpen = true;
+      return;
+    }
     if (this.isAtBase() && this.herdCows().length > 0) {
       this.depositCows();
       return;
     }
     const cow = this.nearestWanderingCow();
-    if (cow && dist(this.player, cow) <= CAPTURE_DIST) this.startLasso(cow);
+    if (cow && dist(this.player, cow) <= this.effectiveCaptureRange) this.startLasso(cow);
   }
 
   private toggleBook() {
     this.bookOpen = !this.bookOpen;
+    if (this.bookOpen) {
+      this.shopOpen = false;
+      this.bookPage = 0;
+      this.bookPageTarget = 0;
+      this.bookPageAnimT = 1;
+    }
+  }
+
+  private bookFlipPage(dir: 1 | -1) {
+    if (this.bookPageAnimT < 1) return; // already animating
+    const next = Math.max(
+      0,
+      Math.min(COW_TYPES.length - 1, this.bookPage + dir),
+    );
+    if (next === this.bookPage) return;
+    this.bookPageTarget = next;
+    this.bookPageAnimDir = dir;
+    this.bookPageAnimT = 0;
   }
 
   private toggleStakeAim() {
@@ -630,6 +867,13 @@ export class Game {
     const dt = Math.min((t - this.lastTime) / 1000, 0.1);
     this.lastTime = t;
     this.time += dt;
+    // Advance book page-flip animation
+    if (this.bookPageAnimT < 1) {
+      this.bookPageAnimT = Math.min(1, this.bookPageAnimT + dt * 6);
+      if (this.bookPageAnimT >= 0.5 && this.bookPage !== this.bookPageTarget) {
+        this.bookPage = this.bookPageTarget;
+      }
+    }
     if (!this.bookOpen) {
       this.update(dt);
     }
@@ -667,8 +911,11 @@ export class Game {
     this.cowSpawnTimer -= dt;
     if (this.cowSpawnTimer <= 0) {
       const active = this.cows.filter(
-        (c) => c.state === "wandering" || c.state === "fleeing" ||
-               c.state === "lassoed"  || c.state === "captured",
+        (c) =>
+          c.state === "wandering" ||
+          c.state === "fleeing" ||
+          c.state === "lassoed" ||
+          c.state === "captured",
       ).length;
       if (active < COW_COUNT) {
         this.cows.push(spawnCow(this.nextCowId++, this.map));
@@ -691,10 +938,26 @@ export class Game {
       .filter((c) => c.state === "based")
       .sort((a, b) => a.herdIndex - b.herdIndex)
       .map((c) => c.type.id);
+    const inventory = Object.fromEntries(this.inventory);
     // Via WebSocket (mais eficiente — já conectado)
-    this.network?.sendSave(this.basedCount, discovered, capturedByType, basedCowTypes);
+    this.network?.sendSave(
+      this.basedCount,
+      discovered,
+      capturedByType,
+      basedCowTypes,
+      this.coins,
+      inventory,
+    );
     // Via HTTP com keepalive — garante entrega mesmo ao fechar a aba
-    saveGameState(this.myToken, this.basedCount, discovered, capturedByType, basedCowTypes);
+    saveGameState(
+      this.myToken,
+      this.basedCount,
+      discovered,
+      capturedByType,
+      basedCowTypes,
+      this.coins,
+      inventory,
+    );
   }
 
   private updateStake(dt: number) {
@@ -785,11 +1048,11 @@ export class Game {
       dr /= len;
       const nc = Math.max(
         0.5,
-        Math.min(MAP_COLS - 1.5, this.player.col + dc * PLAYER_SPEED * dt),
+        Math.min(MAP_COLS - 1.5, this.player.col + dc * this.effectiveSpeed * dt),
       );
       const nr = Math.max(
         0.5,
-        Math.min(MAP_ROWS - 1.5, this.player.row + dr * PLAYER_SPEED * dt),
+        Math.min(MAP_ROWS - 1.5, this.player.row + dr * this.effectiveSpeed * dt),
       );
       const tc = this.map[Math.floor(nr)]![Math.floor(nc)]!;
       if (!isObstacle(tc)) {
@@ -918,7 +1181,7 @@ export class Game {
     }
     if (l.phase === "pulling") {
       l.timeLeft -= dt;
-      if (l.clickCount >= l.cow.type.clicksNeeded) {
+      if (l.clickCount >= this.effectiveLassoClicks(l.cow.type.clicksNeeded)) {
         this.captureCow(l.cow);
         l.active = false;
         return;
@@ -991,10 +1254,107 @@ export class Game {
       r < BASE_ROW + BASE_SIZE
     );
   }
+
+  // ─── Efeitos de itens ─────────────────────────────────────────────────────
+
+  private get effectiveSpeed() {
+    return PLAYER_SPEED * (1 + (this.inventory.get("esporas") ?? 0) * 0.1);
+  }
+
+  private get effectiveCaptureRange() {
+    return CAPTURE_DIST + (this.inventory.get("lasso_longo") ?? 0) * 0.5;
+  }
+
+  private effectiveLassoClicks(base: number) {
+    return Math.max(1, base - (this.inventory.get("lasso_forte") ?? 0) * 3);
+  }
+
+  private isAtVendor() {
+    return (
+      dist(this.player, { col: VENDOR_COL, row: VENDOR_ROW }) <=
+      VENDOR_INTERACT_DIST
+    );
+  }
+
+  private saveCoinsLocally() {
+    localStorage.setItem(`cowboy_coins_${this.myName}`, String(this.coins));
+  }
+
+  private sellCow(cow: Cow) {
+    const price = COW_SELL_PRICES[cow.type.rarity] ?? 10;
+    this.coins += price;
+    this.saveCoinsLocally();
+    const idx = this.cows.indexOf(cow);
+    if (idx !== -1) this.cows.splice(idx, 1);
+    // Reindexar o rebanho restante
+    this.herdCows().forEach((c, i) => {
+      c.herdIndex = i;
+    });
+    this.triggerSave();
+  }
+
+  private sellAllCows() {
+    const herd = this.herdCows();
+    if (herd.length === 0) return;
+    for (const cow of herd) {
+      this.coins += COW_SELL_PRICES[cow.type.rarity] ?? 10;
+      const idx = this.cows.indexOf(cow);
+      if (idx !== -1) this.cows.splice(idx, 1);
+    }
+    this.saveCoinsLocally();
+    this.triggerSave();
+  }
+
+  private sellBasedCow(cow: Cow) {
+    this.coins += COW_SELL_PRICES[cow.type.rarity] ?? 10;
+    this.saveCoinsLocally();
+    const idx = this.cows.indexOf(cow);
+    if (idx !== -1) this.cows.splice(idx, 1);
+    this.basedCount = Math.max(0, this.basedCount - 1);
+    // Reindexar e reposicionar vacas restantes no curral
+    this.basedCows()
+      .sort((a, b) => a.herdIndex - b.herdIndex)
+      .forEach((c, i) => {
+        c.herdIndex = i;
+        const pos = basedSlotPos(i);
+        c.col = pos.col;
+        c.row = pos.row;
+      });
+    this.triggerSave();
+  }
+
+  private sellAllBasedCows() {
+    const based = this.basedCows();
+    if (based.length === 0) return;
+    for (const cow of based) {
+      this.coins += COW_SELL_PRICES[cow.type.rarity] ?? 10;
+      const idx = this.cows.indexOf(cow);
+      if (idx !== -1) this.cows.splice(idx, 1);
+    }
+    this.basedCount = 0;
+    this.saveCoinsLocally();
+    this.triggerSave();
+  }
+
+  private buyItem(item: GameItem) {
+    const level = this.inventory.get(item.id) ?? 0;
+    if (level >= item.maxLevel) return;
+    const price = itemNextPrice(item, level);
+    if (this.coins < price) return;
+    this.coins -= price;
+    this.inventory.set(item.id, level + 1);
+    this.saveCoinsLocally();
+    this.triggerSave();
+  }
+
   private herdCows() {
     return this.cows
       .filter((c) => c.state === "captured")
       .sort((a, b) => a.herdIndex - b.herdIndex);
+  }
+
+  private basedCows() {
+    return this.cows.filter((c) => c.state === "based");
   }
   private nearestWanderingCow(): Cow | null {
     let best: Cow | null = null,
@@ -1058,6 +1418,7 @@ export class Game {
     this.renderStake();
     if (this.bookOpen) this.renderBook();
     else this.renderUI();
+    if (this.shopOpen) this.renderShop();
   }
 
   // ─── Tile drawing ─────────────────────────────────────────────────────────
@@ -1095,127 +1456,77 @@ export class Game {
     water: { path: "tiles/tile_water_anim.png", frames: 4, fps: 4 },
   };
 
-  // ─── Craftpix HUD asset path (Main_tiles.png used for border artwork only) ───
-  private static readonly CP =
-    "hud/craftpix-net-255216-free-basic-pixel-art-ui-for-rpg/PNG/";
-  private static HUD_TILES = Game.CP + "Main_tiles.png"; // 384×304
-
-  // ─── Panel — draws a craftpix-style brown wood pixel-art panel ─────────────
-  // Color palette measured from Main_tiles.png:
-  //   interior fill  → #4a2e0f (dark wood)
-  //   inner edge     → rgb(131,99,68) = #836344 (medium wood)
-  //   outer rim      → rgb(155,126,87) = #9b7e57
-  //   highlight      → rgb(176,149,105) = #b09569
-  //   gold accent    → #c89040
+  // ─── Panel — draws a clean pixel-art wood frame (canvas-only, no sprites) ──
+  // Style variants: 0=warm brown, 1=darker brown, 2=grey-green, 3=olive
   private drawPanel(x: number, y: number, w: number, h: number, style = 0) {
     const { ctx } = this;
-    const img = sprites.get(Game.HUD_TILES);
 
-    // ── Interior fill ──────────────────────────────────────────────────────────
-    // Tint variants: 0=warm brown, 1=darker, 2=grey-green, 3=olive
-    const fills = ["#3a2208", "#2a1606", "#2e3022", "#2c3020"];
-    const rims = ["#9b7e57", "#7a5e38", "#7a8a64", "#686e4a"];
-    const accents = ["#c89040", "#a07028", "#98a060", "#8a9050"];
+    const fills = ["#3a2208", "#261505", "#2a2d1e", "#282c1c"] as const;
+    const borders = ["#7a5c32", "#5e4020", "#5a6445", "#525e40"] as const;
+    const lights = ["#b08848", "#886030", "#8a9868", "#7a8858"] as const;
+    const darks = ["#4a3018", "#341c0a", "#3a4228", "#343c24"] as const;
+    const accents = ["#c89040", "#a07028", "#98a060", "#8a9050"] as const;
+
+    const fill = fills[style] ?? fills[0];
+    const border = borders[style] ?? borders[0];
+    const light = lights[style] ?? lights[0];
+    const dark = darks[style] ?? darks[0];
+    const accent = accents[style] ?? accents[0];
 
     ctx.save();
 
-    // 4-px outer rim
-    ctx.fillStyle = rims[style] ?? rims[0]!;
+    // ── Drop shadow ──────────────────────────────────────────────────────────
+    ctx.fillStyle = "rgba(0,0,0,0.45)";
+    ctx.fillRect(x + 3, y + 3, w, h);
+
+    // ── Outer border fill ────────────────────────────────────────────────────
+    ctx.fillStyle = border;
     ctx.fillRect(x, y, w, h);
 
-    // 2-px mid edge
-    ctx.fillStyle = "#836344";
+    // ── Bevel: top + left highlight ──────────────────────────────────────────
+    ctx.fillStyle = light;
+    ctx.fillRect(x, y, w, 3); // top
+    ctx.fillRect(x, y, 3, h); // left
+
+    // ── Bevel: bottom + right shadow ─────────────────────────────────────────
+    ctx.fillStyle = dark;
+    ctx.fillRect(x, y + h - 3, w, 3); // bottom
+    ctx.fillRect(x + w - 3, y, 3, h); // right
+
+    // ── Inner fill ───────────────────────────────────────────────────────────
+    ctx.fillStyle = fill;
     ctx.fillRect(x + 4, y + 4, w - 8, h - 8);
 
-    // inner fill
-    ctx.fillStyle = fills[style] ?? fills[0]!;
-    ctx.fillRect(x + 6, y + 6, w - 12, h - 12);
+    // ── Inner bevel: top + left ───────────────────────────────────────────────
+    ctx.fillStyle = "rgba(255,210,130,0.10)";
+    ctx.fillRect(x + 4, y + 4, w - 8, 2);
+    ctx.fillRect(x + 4, y + 4, 2, h - 8);
 
-    // 1-px gold accent line (inner border)
-    ctx.strokeStyle = accents[style] ?? accents[0]!;
+    // ── Inner bevel: bottom + right ──────────────────────────────────────────
+    ctx.fillStyle = "rgba(0,0,0,0.22)";
+    ctx.fillRect(x + 4, y + h - 6, w - 8, 2);
+    ctx.fillRect(x + w - 6, y + 4, 2, h - 8);
+
+    // ── Gold accent line ─────────────────────────────────────────────────────
+    ctx.strokeStyle = accent;
     ctx.lineWidth = 1;
-    ctx.strokeRect(x + 7.5, y + 7.5, w - 15, h - 15);
+    ctx.globalAlpha = 0.55;
+    ctx.strokeRect(x + 5.5, y + 5.5, w - 11, h - 11);
+    ctx.globalAlpha = 1;
 
-    // ── Corner studs (pixel art detail) ──────────────────────────────────────
-    ctx.fillStyle = accents[style] ?? accents[0]!;
-    const cs = 4;
-    ctx.fillRect(x + 2, y + 2, cs, cs);
-    ctx.fillRect(x + w - 2 - cs, y + 2, cs, cs);
-    ctx.fillRect(x + 2, y + h - 2 - cs, cs, cs);
-    ctx.fillRect(x + w - 2 - cs, y + h - 2 - cs, cs, cs);
-
-    // ── Overlay border sprite from Main_tiles.png if loaded ──────────────────
-    // Use only the corner and edge pieces of style 0 at their natural size (26/8/24 × 37 px)
-    // drawn at the four corners/edges — this adds authentic pixel art border detail
-    if (img) {
-      ctx.imageSmoothingEnabled = false;
-      const SO = Math.floor(style) * 96;
-      const SX_L = SO + 11,
-        SX_M = SO + 48,
-        SX_R = SO + 64;
-      const CL = 26,
-        CM = 8,
-        CR = 24;
-
-      // Use a thin 12px slice of each border cell so we get the textured edge
-      // without the wide banding that makes the stripes visible
-      const BT = 12; // border thickness to draw
-
-      // ── Top edge ────────
-      ctx.drawImage(img, SX_L, 0, CL, BT, x, y, CL, BT);
-      for (let tx = CL; tx < w - CR; tx += CM)
-        ctx.drawImage(
-          img,
-          SX_M,
-          0,
-          CM,
-          BT,
-          x + tx,
-          y,
-          Math.min(CM, w - CR - tx),
-          BT,
-        );
-      ctx.drawImage(img, SX_R, 0, CR, BT, x + w - CR, y, CR, BT);
-      // ── Bottom edge ────
-      ctx.drawImage(img, SX_L, 96 + 37 - BT, CL, BT, x, y + h - BT, CL, BT);
-      for (let tx = CL; tx < w - CR; tx += CM)
-        ctx.drawImage(
-          img,
-          SX_M,
-          96 + 37 - BT,
-          CM,
-          BT,
-          x + tx,
-          y + h - BT,
-          Math.min(CM, w - CR - tx),
-          BT,
-        );
-      ctx.drawImage(
-        img,
-        SX_R,
-        96 + 37 - BT,
-        CR,
-        BT,
-        x + w - CR,
-        y + h - BT,
-        CR,
-        BT,
-      );
-      // ── Left edge ──────
-      ctx.drawImage(img, SX_L, 0, BT, 37, x, y, BT, Math.min(37, h));
-      // ── Right edge ─────
-      ctx.drawImage(
-        img,
-        SX_R + CR - BT,
-        0,
-        BT,
-        37,
-        x + w - BT,
-        y,
-        BT,
-        Math.min(37, h),
-      );
-    }
+    // ── Corner rivets ────────────────────────────────────────────────────────
+    const drawRivet = (rx: number, ry: number) => {
+      ctx.fillStyle = accent;
+      ctx.fillRect(rx, ry, 5, 5);
+      ctx.fillStyle = light; // highlight pixel (top-left)
+      ctx.fillRect(rx, ry, 2, 2);
+      ctx.fillStyle = "rgba(0,0,0,0.45)"; // shadow pixel (bottom-right)
+      ctx.fillRect(rx + 3, ry + 3, 2, 2);
+    };
+    drawRivet(x + 2, y + 2);
+    drawRivet(x + w - 7, y + 2);
+    drawRivet(x + 2, y + h - 7);
+    drawRivet(x + w - 7, y + h - 7);
 
     ctx.restore();
   }
@@ -1599,22 +1910,57 @@ export class Game {
   private renderEntities() {
     const { colMin, colMax, rowMin, rowMax } = this.visibleTileRange();
 
-    // Pass 1: decorations (trees, etc.) in depth order
+    // Pass 1: flat decorations (flowers) that never overlap entities
     for (let r = rowMin; r <= rowMax; r++) {
       for (let c = colMin; c <= colMax; c++) {
         const tile = this.map[r]![c]!;
-        if (tile.decoration !== "none")
-          this.drawDecoration(c, r, tile.decoration);
+        const deco = tile.decoration;
+        // Tall objects (tree, bush, cactus, boulder) go into depth-sorted pass
+        if (
+          deco !== "none" &&
+          deco !== "tree" &&
+          deco !== "bush" &&
+          deco !== "cactus" &&
+          deco !== "boulder"
+        )
+          this.drawDecoration(c, r, deco);
       }
     }
 
-    // Pass 2: entities sorted by depth
+    // Pass 2: entities + tall decorations sorted by depth
     type Item = { depth: number; draw: () => void };
     const items: Item[] = [];
+
+    // Tall decorations
+    for (let r = rowMin; r <= rowMax; r++) {
+      for (let c = colMin; c <= colMax; c++) {
+        const tile = this.map[r]![c]!;
+        const deco = tile.decoration;
+        if (
+          deco === "tree" ||
+          deco === "bush" ||
+          deco === "cactus" ||
+          deco === "boulder"
+        ) {
+          const col = c,
+            row = r;
+          items.push({
+            depth: col + row,
+            draw: () => this.drawDecoration(col, row, deco),
+          });
+        }
+      }
+    }
 
     items.push({
       depth: this.player.col + this.player.row,
       draw: () => this.drawPlayer(),
+    });
+
+    // Vendedor NPC
+    items.push({
+      depth: VENDOR_COL + VENDOR_ROW - 0.5,
+      draw: () => this.drawVendorNPC(),
     });
 
     for (const cow of this.cows) {
@@ -1837,16 +2183,6 @@ export class Game {
     const img = sprites.get(spritePath);
     if (img) {
       ctx.drawImage(img, x - SW / 2, y - SH + 12, SW, SH);
-    } else {
-      // Canvas fallback while sprites load
-      const bob = this.player.moving ? Math.sin(this.time * 11) * 2 : 0;
-      const py = y + bob;
-      ctx.fillStyle = "#3a5a9f";
-      ctx.fillRect(x - 9, py - 26, 18, 20);
-      ctx.fillStyle = "#f4c28a";
-      ctx.fillRect(x - 7, py - 38, 14, 14);
-      ctx.fillStyle = "#8B4513";
-      ctx.fillRect(x - 9, py - 56, 18, 20);
     }
 
     // Capture range ring
@@ -2237,7 +2573,7 @@ export class Game {
     } else {
       // ── Versão expandida ──
       const PW = 210,
-        PH = 132;
+        PH = 152;
       this.drawPanel(6, 6, PW, PH, 0);
 
       // Cabeçalho: cor + nome do jogador
@@ -2267,16 +2603,17 @@ export class Game {
           `${this.cows.filter((c) => c.state === "wandering" || c.state === "fleeing").length}`,
         ],
         ["📖  Descob.:", `${this.discovered.size} / ${COW_TYPES.length}`],
+        ["💰  Moedas:", `${this.coins}`],
       ];
 
       let ry = 48;
       for (const [label, value] of rows) {
         ctx.font = "12px sans-serif";
-        ctx.fillStyle = "#C8A870";
+        ctx.fillStyle = label.startsWith("💰") ? "#FFD700" : "#C8A870";
         ctx.textAlign = "left";
         ctx.fillText(label, 14, ry);
         ctx.font = "bold 12px sans-serif";
-        ctx.fillStyle = "#FFE0A0";
+        ctx.fillStyle = label.startsWith("💰") ? "#FFD700" : "#FFE0A0";
         ctx.textAlign = "right";
         ctx.fillText(value, PW - 10, ry);
         ry += 20;
@@ -2378,41 +2715,116 @@ export class Game {
     const { ctx } = this;
     const now = Date.now();
 
-    // Mensagens recentes (últimos 12s, máx 6)
+    if (this.chatOpen) {
+      // ── Chat aberto: painel de histórico scrollável ─────────────────────────
+      const PW = Math.min(W - 20, 320);
+      const lineH = 18;
+      const padV = 8;
+      const MAX_VISIBLE = 8;
+      const msgs = this.chatMessages;
+      const totalMsgs = msgs.length;
+
+      // chatHistoryScroll: quantas mensagens acima do bottom estamos
+      this.chatHistoryScroll = Math.max(
+        0,
+        Math.min(this.chatHistoryScroll, Math.max(0, totalMsgs - MAX_VISIBLE)),
+      );
+
+      const firstIdx = Math.max(
+        0,
+        totalMsgs - MAX_VISIBLE - this.chatHistoryScroll,
+      );
+      const slice = msgs.slice(firstIdx, firstIdx + MAX_VISIBLE);
+
+      const panelH = Math.max(
+        lineH + padV * 2,
+        slice.length * lineH + padV * 2,
+      );
+      const panelY = H - 195 - panelH;
+
+      this.drawPanel(6, panelY, PW, panelH, 0);
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(8, panelY + 2, PW - 4, panelH - 4);
+      ctx.clip();
+
+      let ty = panelY + padV + 12;
+      for (const msg of slice) {
+        ctx.globalAlpha = 1;
+        ctx.font = "bold 11px sans-serif";
+        ctx.textAlign = "left";
+        ctx.fillStyle = msg.color;
+        const nameLabel = msg.name + ": ";
+        const nameW = ctx.measureText(nameLabel).width;
+        ctx.fillText(nameLabel, 14, ty);
+
+        ctx.font = "11px sans-serif";
+        ctx.fillStyle = "#FFE0A0";
+        const maxW = PW - nameW - 24;
+        let text = msg.text;
+        while (ctx.measureText(text).width > maxW && text.length > 3)
+          text = text.slice(0, -1);
+        if (text !== msg.text) text += "…";
+        ctx.fillText(text, 14 + nameW, ty);
+        ty += lineH;
+      }
+      ctx.restore();
+
+      // Scroll hint
+      if (this.chatHistoryScroll > 0) {
+        ctx.save();
+        ctx.globalAlpha = 0.8;
+        ctx.font = "bold 10px sans-serif";
+        ctx.fillStyle = "#FFD700";
+        ctx.textAlign = "left";
+        ctx.fillText("▲ scroll (roda do mouse)", 14, panelY - 5);
+        ctx.restore();
+      }
+
+      ctx.save();
+      ctx.globalAlpha = 0.75;
+      ctx.font = "bold 10px sans-serif";
+      ctx.fillStyle = "#FFD700";
+      ctx.textAlign = "left";
+      ctx.fillText("Enter = enviar  •  Esc = fechar", 14, H - 183);
+      ctx.restore();
+      return;
+    }
+
+    // ── Chat fechado: mensagens recentes flutuantes ─────────────────────────
     const recent = this.chatMessages
       .filter((m) => now - m.time < 12000)
-      .slice(-6);
+      .slice(-5);
 
-    if (recent.length === 0 && !this.chatOpen) {
-      // Dica sutil
+    if (recent.length === 0) {
       ctx.save();
       ctx.globalAlpha = 0.4;
       ctx.font = "11px sans-serif";
       ctx.fillStyle = "#C8A870";
       ctx.textAlign = "left";
-      // Fica logo acima do painel de chat vazio (H-157)
-      ctx.fillText("T = Chat", 14, H - 157);
+      ctx.fillText("T = Chat", 14, H - 200);
       ctx.restore();
       return;
     }
 
-    const PW = 272;
+    const PW = Math.min(W - 20, 272);
     const lineH = 18;
     const padV = 8;
     const panelH = recent.length * lineH + padV * 2;
-    // Âncora: bottom da área de chat = H-165 (acima do joystick em H-142 e do input em H-160)
-    const panelBottom = this.chatOpen ? H - 165 : H - 155;
-    const panelY = panelBottom - panelH;
+    const panelY = H - 155 - panelH;
 
     this.drawPanel(6, panelY, PW, panelH, 0);
 
     ctx.save();
+    ctx.beginPath();
+    ctx.rect(8, panelY + 2, PW - 4, panelH - 4);
+    ctx.clip();
+
     let ty = panelY + padV + 12;
     for (const msg of recent) {
       const age = (now - msg.time) / 12000;
-      const alpha = Math.max(0.35, 1 - age * 0.7);
-
-      ctx.globalAlpha = alpha;
+      ctx.globalAlpha = Math.max(0.35, 1 - age * 0.7);
       ctx.font = "bold 11px sans-serif";
       ctx.textAlign = "left";
       ctx.fillStyle = msg.color;
@@ -2422,28 +2834,15 @@ export class Game {
 
       ctx.font = "11px sans-serif";
       ctx.fillStyle = "#FFE0A0";
+      const maxW = PW - nameW - 24;
       let text = msg.text;
-      const maxW = PW - nameW - 20;
-      while (ctx.measureText(text).width > maxW && text.length > 3) {
+      while (ctx.measureText(text).width > maxW && text.length > 3)
         text = text.slice(0, -1);
-      }
       if (text !== msg.text) text += "…";
       ctx.fillText(text, 14 + nameW, ty);
-
       ty += lineH;
     }
     ctx.restore();
-
-    // Indicador quando input está aberto (logo acima do painel de mensagens)
-    if (this.chatOpen) {
-      ctx.save();
-      ctx.globalAlpha = 0.75;
-      ctx.font = "bold 10px sans-serif";
-      ctx.fillStyle = "#FFD700";
-      ctx.textAlign = "left";
-      ctx.fillText("Enter = enviar  •  Esc = fechar", 14, panelY - 5);
-      ctx.restore();
-    }
   }
 
   // ── Botão do livro (top-right) ────────────────────────────────────────────
@@ -2469,9 +2868,14 @@ export class Game {
     const nearest = this.nearestWanderingCow();
     const atBase = this.isAtBase(),
       hasHerd = this.herdCows().length > 0;
+    const atVendor = this.isAtVendor();
     let hint = "";
     const isMobile = W < 600;
-    if (atBase && hasHerd)
+    if (atVendor && !this.shopOpen)
+      hint = isMobile
+        ? "Botão: Abrir Loja!"
+        : "Pressione E / botão para abrir a LOJA!";
+    else if (atBase && hasHerd)
       hint = isMobile
         ? "Botão: Depositar na base!"
         : "Pressione E / botão para DEPOSITAR na base!";
@@ -2671,35 +3075,38 @@ export class Game {
     ctx.fillStyle = "rgba(0,0,0,0.78)";
     ctx.fillRect(0, 0, W, H);
 
-    // Book panel — craftpix 9-slice (style 1)
+    // Book panel
     this.drawPanel(BX, BY, BW, BH, 1);
 
-    // Inner parchment page
+    // Inner parchment
+    const parchX = BX + 26;
+    const parchY = BY + 37;
+    const parchW = BW - 50;
+    const parchH = BH - 74;
     ctx.fillStyle = "#f2e8cc";
-    ctx.fillRect(BX + 26, BY + 37, BW - 50, BH - 74);
+    ctx.fillRect(parchX, parchY, parchW, parchH);
 
-    // Title
+    // ── Fixed header ─────────────────────────────────────────────────────────
     ctx.fillStyle = "#5c2e08";
     ctx.font = "bold 20px serif";
     ctx.textAlign = "center";
-    ctx.fillText("📖  Livro do Cowboy", BX + BW / 2, BY + 62);
+    ctx.fillText("📖  Livro do Cowboy", BX + BW / 2, parchY + 26);
     ctx.fillStyle = "#887050";
     ctx.font = "13px serif";
     ctx.fillText(
       `Descobertas: ${this.discovered.size} / ${COW_TYPES.length}`,
       BX + BW / 2,
-      BY + 80,
+      parchY + 44,
     );
-
-    // Divider
+    const headerH = 56;
     ctx.strokeStyle = "#c8a060";
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(BX + 36, BY + 88);
-    ctx.lineTo(BX + BW - 36, BY + 88);
+    ctx.moveTo(parchX + 10, parchY + headerH);
+    ctx.lineTo(parchX + parchW - 10, parchY + headerH);
     ctx.stroke();
 
-    // Close button (pixel art button from Buttons.png)
+    // Close button
     const closeBtnX = BX + BW - 54,
       closeBtnY = BY + 8;
     this.drawPixelBtn(closeBtnX, closeBtnY, 48, 40, "pressed");
@@ -2710,89 +3117,499 @@ export class Game {
     ctx.fillText("✕", closeBtnX + 24, closeBtnY + 20);
     ctx.textBaseline = "alphabetic";
 
-    // Entries grid (2 columns)
-    const cols = BW > 420 ? 2 : 1;
-    const colW = (BW - 40) / cols;
-    const entryH = 80;
-    const startY = BY + 86;
-    const maxVisible = Math.floor((BH - 100) / entryH);
+    // ── Page-flip animation (horizontal squeeze around parchment centre) ─────
+    // t goes 0→1; scaleX: 1→0 in first half, 0→1 in second half
+    const t = this.bookPageAnimT;
+    const scaleX = t < 0.5 ? 1 - t * 2 : (t - 0.5) * 2;
+    const pageCX = parchX + parchW / 2;
+    const pageTop = parchY + headerH + 2;
+    const pageH = parchH - headerH - 48; // leave room for nav buttons
 
-    COW_TYPES.forEach((t, i) => {
-      const col = i % cols;
-      const row = Math.floor(i / cols);
-      if (row >= maxVisible) return;
+    // Clip the parchment body so drawing stays inside
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(parchX, pageTop, parchW, pageH + 40);
+    ctx.clip();
 
-      const ex = BX + 20 + col * colW;
-      const ey = startY + row * entryH;
-      const discovered = this.discovered.has(t.id);
-      const count = this.capturedByType.get(t.id) ?? 0;
+    // Apply horizontal squeeze centred on page
+    ctx.save();
+    ctx.translate(pageCX, pageTop + pageH / 2);
+    ctx.scale(scaleX, 1);
+    ctx.translate(-pageCX, -(pageTop + pageH / 2));
 
-      // Entry bg
-      ctx.fillStyle = discovered ? "rgba(255,230,180,0.5)" : "rgba(0,0,0,0.06)";
+    // ── Single cow page content ───────────────────────────────────────────────
+    const t2 = COW_TYPES[this.bookPage]!;
+    const discovered = this.discovered.has(t2.id);
+    const count = this.capturedByType.get(t2.id) ?? 0;
+
+    // Cow illustration (large, centred)
+    const cowCX = pageCX;
+    const cowCY = pageTop + 100;
+    if (discovered) {
+      ctx.save();
+      ctx.translate(cowCX, cowCY);
+      ctx.scale(1.4, 1.4);
+      this.drawCowAt(0, 0, t2);
+      ctx.restore();
+    } else {
+      // Silhouette with big ? mark
+      ctx.fillStyle = "rgba(0,0,0,0.12)";
       ctx.beginPath();
-      ctx.roundRect(ex, ey, colW - 8, entryH - 6, 8);
+      ctx.roundRect(cowCX - 44, cowCY - 44, 88, 80, 12);
       ctx.fill();
+      ctx.fillStyle = "#bbb";
+      ctx.font = "bold 52px serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("?", cowCX, cowCY - 4);
+      ctx.textBaseline = "alphabetic";
+    }
 
-      // Cow mini-preview (40x40 area)
-      const previewX = ex + 28,
-        previewY = ey + 30;
-      if (discovered) {
-        ctx.save();
-        ctx.translate(previewX, previewY);
-        ctx.scale(0.45, 0.45);
-        this.drawCowAt(0, 0, t);
-        ctx.restore();
-      } else {
-        // Silhouette
-        ctx.fillStyle = "rgba(0,0,0,0.25)";
-        ctx.beginPath();
-        ctx.roundRect(-16 * 0.45, -20 * 0.45, 30 * 0.45, 28 * 0.45, 3);
-        ctx.fill();
-        ctx.fillStyle = "#bbb";
-        ctx.font = "bold 18px sans-serif";
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText("?", previewX, previewY - 5);
-        ctx.textBaseline = "alphabetic";
+    // Name
+    ctx.fillStyle = discovered ? "#3a1a00" : "#888";
+    ctx.font = `bold ${discovered ? 22 : 18}px serif`;
+    ctx.textAlign = "center";
+    ctx.fillText(discovered ? t2.name : "???", pageCX, cowCY + 68);
+
+    // Rarity badge
+    const rarityColor = RARITY_COLORS[t2.rarity] ?? "#aaa";
+    const rarityLabel = RARITY_LABELS[t2.rarity] ?? t2.rarity;
+    ctx.font = "12px sans-serif";
+    const badgeW = ctx.measureText(rarityLabel).width + 16;
+    const badgeX = pageCX - badgeW / 2;
+    ctx.fillStyle = rarityColor + "33";
+    ctx.beginPath();
+    ctx.roundRect(badgeX, cowCY + 74, badgeW, 20, 6);
+    ctx.fill();
+    ctx.fillStyle = rarityColor;
+    ctx.font = "bold 12px sans-serif";
+    ctx.fillText(rarityLabel, pageCX, cowCY + 88);
+
+    // Divider
+    ctx.strokeStyle = "#c8a060";
+    ctx.lineWidth = 0.8;
+    ctx.globalAlpha = 0.5;
+    ctx.beginPath();
+    ctx.moveTo(parchX + 30, cowCY + 102);
+    ctx.lineTo(parchX + parchW - 30, cowCY + 102);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+
+    // Description (word-wrapped)
+    if (discovered) {
+      ctx.fillStyle = "#5c3010";
+      ctx.font = "13px serif";
+      ctx.textAlign = "center";
+      const maxDescW = parchW - 60;
+      const words = t2.description.split(" ");
+      let line = "";
+      let lineY = cowCY + 122;
+      for (const word of words) {
+        const test = line ? line + " " + word : word;
+        if (ctx.measureText(test).width > maxDescW) {
+          ctx.fillText(line, pageCX, lineY);
+          line = word;
+          lineY += 18;
+        } else {
+          line = test;
+        }
       }
+      if (line) ctx.fillText(line, pageCX, lineY);
+      lineY += 24;
 
-      // Name + rarity
-      const tx = ex + 60,
-        ty2 = ey + 20;
+      ctx.fillStyle = "#887050";
+      ctx.font = "12px sans-serif";
+      ctx.fillText(`Capturadas: ${count}`, pageCX, lineY);
+    } else {
+      ctx.fillStyle = "#aaa";
+      ctx.font = "13px serif";
+      ctx.textAlign = "center";
+      ctx.fillText("Não descoberta ainda.", pageCX, cowCY + 124);
+    }
+
+    ctx.restore(); // end squeeze transform
+    ctx.restore(); // end clip
+
+    // ── Nav buttons (prev / next) ─────────────────────────────────────────────
+    const navY = parchY + parchH - 44;
+    const prevCX = BX + BW / 2 - 70;
+    const nextCX = BX + BW / 2 + 70;
+
+    // Prev
+    const canPrev = this.bookPage > 0;
+    this.drawPixelBtn(
+      prevCX - 28,
+      navY - 16,
+      56,
+      34,
+      canPrev ? "normal" : "pressed",
+    );
+    ctx.fillStyle = canPrev ? "#FFD700" : "#888";
+    ctx.font = "bold 14px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("◀  Ant.", prevCX, navY + 1);
+
+    // Page counter
+    ctx.fillStyle = "#887050";
+    ctx.font = "bold 13px serif";
+    ctx.fillText(
+      `${this.bookPage + 1} / ${COW_TYPES.length}`,
+      BX + BW / 2,
+      navY + 1,
+    );
+
+    // Next
+    const canNext = this.bookPage < COW_TYPES.length - 1;
+    this.drawPixelBtn(
+      nextCX - 28,
+      navY - 16,
+      56,
+      34,
+      canNext ? "normal" : "pressed",
+    );
+    ctx.fillStyle = canNext ? "#FFD700" : "#888";
+    ctx.fillText("Próx.  ▶", nextCX, navY + 1);
+    ctx.textBaseline = "alphabetic";
+
+    // Keyboard hint
+    ctx.fillStyle = "#887050";
+    ctx.font = "10px sans-serif";
+    ctx.fillText(
+      "← → ou scroll para navegar",
+      BX + BW / 2,
+      parchY + parchH - 6,
+    );
+  }
+
+  // ─── Vendedor NPC ─────────────────────────────────────────────────────────
+
+  private drawVendorNPC() {
+    const { ctx } = this;
+    const { x, y } = this.isoToScreen(VENDOR_COL, VENDOR_ROW);
+
+    // Sombra
+    ctx.fillStyle = "rgba(0,0,0,0.25)";
+    ctx.beginPath();
+    ctx.ellipse(x, y + 4, 14, 6, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Sprite
+    const img = sprites.get("npcs/saler.png");
+    const SW = 64,
+      SH = 64;
+    if (img) {
+      ctx.drawImage(img, x - SW / 2, y - SH + 12, SW, SH);
+    } else {
+      // Fallback canvas enquanto o sprite carrega
+      ctx.fillStyle = "#7a4a18";
+      ctx.beginPath();
+      ctx.roundRect(x - 9, y - 30, 18, 22, 3);
+      ctx.fill();
+      ctx.fillStyle = "#e8c090";
+      ctx.beginPath();
+      ctx.arc(x, y - 36, 9, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Moeda animada acima do sprite
+    const coinBob = Math.sin(this.time * 2) * 2;
+    const coinY = y - SH + 12 - 10 + coinBob;
+    ctx.fillStyle = "#FFD700";
+    ctx.beginPath();
+    ctx.arc(x, coinY, 7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "#a07000";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.fillStyle = "#a07000";
+    ctx.font = "bold 8px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("$", x, coinY);
+    ctx.textBaseline = "alphabetic";
+
+    // Nome "Vendedor"
+    ctx.font = "bold 10px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#FFD700";
+    ctx.fillText("Vendedor", x, coinY - 12);
+
+    // Anel de interação quando player está perto
+    if (this.isAtVendor() && !this.shopOpen) {
+      ctx.strokeStyle = "rgba(255,215,0,0.6)";
+      ctx.lineWidth = 2;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.ellipse(x, y + 4, 28, 12, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+
+  // ─── Loja UI ──────────────────────────────────────────────────────────────
+
+  private renderShop() {
+    const { ctx, canvas } = this;
+    const W = canvas.width, H = canvas.height;
+
+    const herd = this.herdCows();
+    const based = this.basedCows().sort((a, b) => a.herdIndex - b.herdIndex);
+    const ROW_H = 52;
+    const SELL_MAX = 4; // max visible per section
+    const PW = Math.min(W - 32, 390);
+
+    // ── Compute panel height per tab ──────────────────────────────────────────
+    let contentH: number;
+    if (this.shopTab === "sell") {
+      const herdRows = Math.max(1, Math.min(herd.length, SELL_MAX));
+      const herdSellAllH = herd.length > 0 ? 44 : 0;
+      const basedRows = Math.max(1, Math.min(based.length, SELL_MAX));
+      const basedSellAllH = based.length > 0 ? 44 : 0;
+      contentH = 24 + herdRows * ROW_H + herdSellAllH + 12 + 24 + basedRows * ROW_H + basedSellAllH + 8;
+    } else {
+      contentH = SHOP_ITEMS.length * 72 + 8;
+    }
+    const HEADER_H = 66; // title + coins
+    const TAB_H = 38;
+    const PH = Math.min(H - 40, HEADER_H + TAB_H + contentH);
+    const PX = (W - PW) / 2;
+    const PY = (H - PH) / 2;
+
+    // ── Overlay + panel ───────────────────────────────────────────────────────
+    ctx.fillStyle = "rgba(0,0,0,0.5)";
+    ctx.fillRect(0, 0, W, H);
+    this.drawPanel(PX, PY, PW, PH, 0);
+
+    // ── Title ─────────────────────────────────────────────────────────────────
+    ctx.textAlign = "center";
+    ctx.font = "bold 16px sans-serif";
+    ctx.fillStyle = "#FFD700";
+    ctx.fillText("🤠  Loja do Vaqueiro", PX + PW / 2, PY + 26);
+    ctx.font = "bold 13px sans-serif";
+    ctx.fillStyle = "#FFD700";
+    ctx.fillText(`💰 ${this.coins} moedas`, PX + PW / 2, PY + 48);
+
+    // ── Close button ──────────────────────────────────────────────────────────
+    const closeCX = PX + PW - 18, closeCY = PY + 18;
+    this.shopCloseBtn = { x: closeCX, y: closeCY, r: 12 };
+    ctx.fillStyle = "#9b3a18";
+    ctx.beginPath();
+    ctx.arc(closeCX, closeCY, 12, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "#e05030"; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.fillStyle = "#FFE0A0"; ctx.font = "bold 13px sans-serif";
+    ctx.textBaseline = "middle"; ctx.textAlign = "center";
+    ctx.fillText("✕", closeCX, closeCY);
+    ctx.textBaseline = "alphabetic";
+
+    // Divisor under header
+    ctx.strokeStyle = "rgba(200,160,80,0.4)"; ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(PX + 10, PY + HEADER_H);
+    ctx.lineTo(PX + PW - 10, PY + HEADER_H);
+    ctx.stroke();
+
+    // ── Tabs ──────────────────────────────────────────────────────────────────
+    this.shopTabBtns = [];
+    const tabLabels: Array<{ tab: "sell" | "buy"; label: string }> = [
+      { tab: "sell", label: "🐄 Vender" },
+      { tab: "buy",  label: "🛒 Comprar" },
+    ];
+    const tabW = PW / tabLabels.length;
+    const tabY = PY + HEADER_H;
+    for (let ti = 0; ti < tabLabels.length; ti++) {
+      const { tab, label } = tabLabels[ti]!;
+      const tx = PX + ti * tabW;
+      const isActive = this.shopTab === tab;
+      ctx.fillStyle = isActive ? "rgba(160,100,20,0.5)" : "rgba(0,0,0,0.25)";
+      ctx.fillRect(tx, tabY, tabW, TAB_H);
+      ctx.fillStyle = isActive ? "#FFD700" : "#C8A870";
+      ctx.font = `${isActive ? "bold " : ""}13px sans-serif`;
+      ctx.textAlign = "center";
+      ctx.fillText(label, tx + tabW / 2, tabY + 24);
+      if (isActive) {
+        ctx.fillStyle = "#c89040";
+        ctx.fillRect(tx, tabY + TAB_H - 3, tabW, 3);
+      }
+      this.shopTabBtns.push({ tab, x: tx, y: tabY, w: tabW, h: TAB_H });
+    }
+
+    // Divisor under tabs
+    ctx.strokeStyle = "rgba(200,160,80,0.4)"; ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(PX + 10, PY + HEADER_H + TAB_H);
+    ctx.lineTo(PX + PW - 10, PY + HEADER_H + TAB_H);
+    ctx.stroke();
+
+    const contentY = PY + HEADER_H + TAB_H;
+
+    // ── Helper: draw a cow row ─────────────────────────────────────────────────
+    const drawCowRow = (cow: Cow, rowY: number, rowIdx: number, btnArr: typeof this.shopSellButtons) => {
+      if (rowIdx % 2 === 0) {
+        ctx.fillStyle = "rgba(255,255,255,0.04)";
+        ctx.fillRect(PX + 6, rowY, PW - 12, ROW_H);
+      }
+      this.drawCowAt(PX + 30, rowY + ROW_H / 2, cow.type);
       ctx.textAlign = "left";
-      ctx.fillStyle = discovered ? "#3a1a00" : "#999";
-      ctx.font = `bold 13px sans-serif`;
-      ctx.fillText(discovered ? t.name : "???", tx, ty2);
+      ctx.font = "bold 11px sans-serif";
+      ctx.fillStyle = "#FFE0A0";
+      ctx.fillText(cow.type.name, PX + 52, rowY + 16);
+      const rc = RARITY_COLORS[cow.type.rarity] ?? "#9e9e9e";
+      const rl = RARITY_LABELS[cow.type.rarity] ?? cow.type.rarity;
+      ctx.font = "9px sans-serif";
+      const bw = ctx.measureText(rl).width + 8;
+      ctx.fillStyle = rc + "33";
+      ctx.beginPath(); ctx.roundRect(PX + 52, rowY + 19, bw, 13, 3); ctx.fill();
+      ctx.fillStyle = rc; ctx.fillText(rl, PX + 56, rowY + 29);
+      const price = COW_SELL_PRICES[cow.type.rarity] ?? 10;
+      ctx.font = "10px sans-serif"; ctx.fillStyle = "#FFD700";
+      ctx.fillText(`💰 ${price}`, PX + 52, rowY + 44);
+      const bW = 64, bH = 24;
+      const bX = PX + PW - bW - 12, bY = rowY + (ROW_H - bH) / 2;
+      this.drawPixelBtn(bX, bY, bW, bH, "normal");
+      ctx.fillStyle = "#FFD700"; ctx.font = "bold 10px sans-serif";
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText("Vender", bX + bW / 2, bY + bH / 2);
+      ctx.textBaseline = "alphabetic";
+      btnArr.push({ cow, x: bX, y: bY, w: bW, h: bH });
+    };
 
-      // Rarity badge
-      const rarityColor = RARITY_COLORS[t.rarity] ?? "#aaa";
-      const rarityLabel = RARITY_LABELS[t.rarity] ?? t.rarity;
-      ctx.fillStyle = rarityColor + "33"; // 20% alpha bg
-      const badgeW = ctx.measureText(rarityLabel).width + 10;
-      ctx.beginPath();
-      ctx.roundRect(tx, ty2 + 4, badgeW, 16, 4);
-      ctx.fill();
-      ctx.fillStyle = rarityColor;
-      ctx.font = "10px sans-serif";
-      ctx.fillText(rarityLabel, tx + 5, ty2 + 15);
+    // ── Helper: "Vender Tudo" button ──────────────────────────────────────────
+    const drawSellAllBtn = (cows: Cow[], atY: number): { x: number; y: number; w: number; h: number } => {
+      if (cows.length === 0) return { x: 0, y: 0, w: 0, h: 0 };
+      const total = cows.reduce((s, c) => s + (COW_SELL_PRICES[c.type.rarity] ?? 10), 0);
+      const bW = Math.min(PW - 40, 230), bH = 30;
+      const bX = PX + (PW - bW) / 2, bY = atY + 7;
+      this.drawPixelBtn(bX, bY, bW, bH, "normal");
+      ctx.fillStyle = "#FFD700"; ctx.font = "bold 12px sans-serif";
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText(`Vender Tudo  💰 ${total}`, bX + bW / 2, bY + bH / 2);
+      ctx.textBaseline = "alphabetic";
+      return { x: bX, y: bY, w: bW, h: bH };
+    };
 
-      // Description or "???"
-      ctx.fillStyle = discovered ? "#5c3010" : "#bbb";
-      ctx.font = "10px serif";
-      const desc = discovered
-        ? t.description.length > 60
-          ? t.description.slice(0, 58) + "…"
-          : t.description
-        : "Não descoberta ainda.";
-      ctx.fillText(desc, tx, ty2 + 36);
+    // ── Sell tab ──────────────────────────────────────────────────────────────
+    if (this.shopTab === "sell") {
+      this.shopSellButtons = [];
+      this.shopSellBasedButtons = [];
+      let cy = contentY + 6;
 
-      // Count
-      if (discovered) {
-        ctx.fillStyle = "#888";
-        ctx.font = "10px sans-serif";
-        ctx.fillText(`Capturadas: ${count}`, tx, ty2 + 52);
+      // Sub-header: Rebanho
+      ctx.textAlign = "left"; ctx.font = "bold 11px sans-serif";
+      ctx.fillStyle = "#C8A870";
+      ctx.fillText("🐄 Rebanho", PX + 12, cy + 13);
+      cy += 20;
+
+      const herdVisible = herd.slice(0, SELL_MAX);
+      if (herdVisible.length === 0) {
+        ctx.font = "11px sans-serif"; ctx.fillStyle = "#7a6040"; ctx.textAlign = "center";
+        ctx.fillText("Rebanho vazio", PX + PW / 2, cy + ROW_H / 2 + 4);
+        cy += ROW_H;
+      } else {
+        for (let i = 0; i < herdVisible.length; i++) {
+          drawCowRow(herdVisible[i]!, cy, i, this.shopSellButtons);
+          cy += ROW_H;
+        }
+        if (herd.length > SELL_MAX) {
+          ctx.font = "10px sans-serif"; ctx.fillStyle = "#C8A870"; ctx.textAlign = "center";
+          ctx.fillText(`+${herd.length - SELL_MAX} mais`, PX + PW / 2, cy - 2);
+        }
       }
-    });
+      this.shopSellAllHerdBtn = drawSellAllBtn(herd, cy);
+      cy += herd.length > 0 ? 44 : 0;
+
+      // Divider
+      cy += 8;
+      ctx.strokeStyle = "rgba(200,160,80,0.3)"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(PX + 16, cy); ctx.lineTo(PX + PW - 16, cy); ctx.stroke();
+      cy += 4;
+
+      // Sub-header: Curral
+      ctx.textAlign = "left"; ctx.font = "bold 11px sans-serif";
+      ctx.fillStyle = "#C8A870";
+      ctx.fillText("🏠 Curral", PX + 12, cy + 13);
+      cy += 20;
+
+      const basedVisible = based.slice(0, SELL_MAX);
+      if (basedVisible.length === 0) {
+        ctx.font = "11px sans-serif"; ctx.fillStyle = "#7a6040"; ctx.textAlign = "center";
+        ctx.fillText("Curral vazio", PX + PW / 2, cy + ROW_H / 2 + 4);
+        cy += ROW_H;
+      } else {
+        for (let i = 0; i < basedVisible.length; i++) {
+          drawCowRow(basedVisible[i]!, cy, i, this.shopSellBasedButtons);
+          cy += ROW_H;
+        }
+        if (based.length > SELL_MAX) {
+          ctx.font = "10px sans-serif"; ctx.fillStyle = "#C8A870"; ctx.textAlign = "center";
+          ctx.fillText(`+${based.length - SELL_MAX} mais`, PX + PW / 2, cy - 2);
+        }
+      }
+      this.shopSellAllBasedBtn = drawSellAllBtn(based, cy);
+
+    // ── Buy tab ───────────────────────────────────────────────────────────────
+    } else {
+      this.shopBuyButtons = [];
+      let cy = contentY + 8;
+      const itemH = 72;
+
+      for (const item of SHOP_ITEMS) {
+        const level = this.inventory.get(item.id) ?? 0;
+        const maxed = level >= item.maxLevel;
+        const price = maxed ? 0 : itemNextPrice(item, level);
+        const canAfford = !maxed && this.coins >= price;
+
+        // Row bg
+        ctx.fillStyle = "rgba(255,255,255,0.03)";
+        ctx.fillRect(PX + 6, cy, PW - 12, itemH - 2);
+
+        // Icon
+        ctx.font = "28px sans-serif"; ctx.textAlign = "center";
+        ctx.fillText(item.icon, PX + 28, cy + 36);
+
+        // Name
+        ctx.textAlign = "left"; ctx.font = "bold 12px sans-serif";
+        ctx.fillStyle = "#FFE0A0";
+        ctx.fillText(item.name, PX + 50, cy + 18);
+
+        // Description
+        ctx.font = "10px sans-serif"; ctx.fillStyle = "#C8A870";
+        ctx.fillText(item.description, PX + 50, cy + 32);
+
+        // Level pips
+        ctx.fillStyle = "#9b7e57";
+        for (let i = 0; i < item.maxLevel; i++) {
+          ctx.fillStyle = i < level ? "#FFD700" : "#3a2208";
+          ctx.beginPath();
+          ctx.arc(PX + 52 + i * 14, cy + 48, 5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = "#9b7e57"; ctx.lineWidth = 1; ctx.stroke();
+        }
+        ctx.font = "10px sans-serif"; ctx.fillStyle = "#C8A870"; ctx.textAlign = "left";
+        ctx.fillText(`Nível ${level}/${item.maxLevel}`, PX + 52 + item.maxLevel * 14 + 4, cy + 52);
+
+        // Buy button
+        const bW = 72, bH = 28;
+        const bX = PX + PW - bW - 12, bY = cy + (itemH - bH) / 2;
+        if (maxed) {
+          this.drawPixelBtn(bX, bY, bW, bH, "pressed");
+          ctx.fillStyle = "#7a6040"; ctx.font = "bold 10px sans-serif";
+          ctx.textAlign = "center"; ctx.textBaseline = "middle";
+          ctx.fillText("Máximo", bX + bW / 2, bY + bH / 2);
+        } else {
+          this.drawPixelBtn(bX, bY, bW, bH, canAfford ? "normal" : "pressed");
+          ctx.fillStyle = canAfford ? "#FFD700" : "#7a6040";
+          ctx.font = "bold 10px sans-serif";
+          ctx.textAlign = "center"; ctx.textBaseline = "middle";
+          ctx.fillText(`💰 ${price}`, bX + bW / 2, bY + bH / 2);
+          if (canAfford) this.shopBuyButtons.push({ item, x: bX, y: bY, w: bW, h: bH });
+        }
+        ctx.textBaseline = "alphabetic";
+
+        cy += itemH;
+      }
+    }
   }
 
   // Draws a cow centered at (0,0) — used by book preview (call inside a scaled ctx.save/restore)

@@ -45,6 +45,7 @@ interface UserDoc {
   discoveredTypes: string[];
   capturedByType: Record<string, number>;
   basedCows: string[]; // IDs dos tipos de vaca na base
+  coins: number;
 }
 
 // ─── Sessões em memória ───────────────────────────────────────────────────────
@@ -157,6 +158,7 @@ server = Bun.serve<WsData>({
         discoveredTypes: [],
         capturedByType: {},
         basedCows: [],
+        coins: 0,
       } as Omit<UserDoc, "_id">);
 
       const token = crypto.randomUUID();
@@ -173,6 +175,7 @@ server = Bun.serve<WsData>({
         discovered: [],
         capturedByType: {},
         basedCows: [],
+        coins: 0,
       });
     },
 
@@ -213,6 +216,7 @@ server = Bun.serve<WsData>({
         discovered: row.discoveredTypes ?? [],
         capturedByType: row.capturedByType ?? {},
         basedCows: row.basedCows ?? [],
+        coins: row.coins ?? 0,
       });
     },
 
@@ -241,6 +245,7 @@ server = Bun.serve<WsData>({
         discovered: row.discoveredTypes ?? [],
         capturedByType: row.capturedByType ?? {},
         basedCows: row.basedCows ?? [],
+        coins: row.coins ?? 0,
       });
     },
 
@@ -253,6 +258,7 @@ server = Bun.serve<WsData>({
         discovered?: string[];
         capturedByType?: Record<string, number>;
         basedCowTypes?: string[];
+        coins?: number;
       };
       const sess = sessions.get(body.token ?? "");
       if (!sess) return new Response("Unauthorized", { status: 401 });
@@ -267,6 +273,9 @@ server = Bun.serve<WsData>({
             basedCows: Array.isArray(body.basedCowTypes)
               ? body.basedCowTypes
               : [],
+            coins: typeof body.coins === "number" && body.coins >= 0
+              ? Math.floor(body.coins)
+              : 0,
           },
         },
       );
@@ -425,6 +434,9 @@ server = Bun.serve<WsData>({
                 basedCows: Array.isArray(u.basedCowTypes)
                   ? u.basedCowTypes
                   : [],
+                coins: typeof u.coins === "number" && u.coins >= 0
+                  ? Math.floor(u.coins)
+                  : 0,
               },
             },
           );
