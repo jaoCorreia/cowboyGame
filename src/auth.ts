@@ -6,6 +6,7 @@ export interface UserData {
   color: string;
   basedCount: number;
   discovered: string[];
+  discoveredNPCs: string[];
   capturedByType: Record<string, number>;
   basedCows: string[]; // IDs dos tipos de vaca na base
   coins: number;
@@ -182,6 +183,7 @@ export async function saveGameState(
   token: string,
   basedCount: number,
   discovered: string[],
+  discoveredNPCs: string[],
   capturedByType: Record<string, number>,
   basedCowTypes: string[],
   coins: number,
@@ -191,7 +193,7 @@ export async function saveGameState(
     await fetch("/auth/save", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token, basedCount, discovered, capturedByType, basedCowTypes, coins, inventory }),
+      body: JSON.stringify({ token, basedCount, discovered, discoveredNPCs, capturedByType, basedCowTypes, coins, inventory }),
       keepalive: true, // garante entrega mesmo se a página fechar durante o request
     });
   } catch {

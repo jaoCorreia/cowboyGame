@@ -361,6 +361,8 @@ export class Game {
       // basedCows é a fonte de verdade — não usa basedCount da DB (pode estar desatualizado)
       this.basedCount = userData.basedCows?.length ?? userData.basedCount;
       this.discovered = new Set(userData.discovered);
+      this.discoveredNPCs = new Set(userData.discoveredNPCs ?? []);
+      this.vendorMet = this.discoveredNPCs.has("vendedor");
       this.capturedByType = new Map(Object.entries(userData.capturedByType));
       // Coins: server é a fonte de verdade; localStorage é fallback se o server retornar 0
       const serverCoins = userData.coins ?? 0;
@@ -529,6 +531,7 @@ export class Game {
           token: this.myToken,
           basedCount: this.basedCount,
           discovered: [...this.discovered],
+          discoveredNPCs: [...this.discoveredNPCs],
           capturedByType: Object.fromEntries(this.capturedByType),
           basedCowTypes: this.cows
             .filter((c) => c.state === "based")
@@ -1349,6 +1352,7 @@ export class Game {
 
   private triggerSave() {
     const discovered = [...this.discovered];
+    const discoveredNPCs = [...this.discoveredNPCs];
     const capturedByType = Object.fromEntries(this.capturedByType);
     const basedCowTypes = this.cows
       .filter((c) => c.state === "based")
@@ -1359,6 +1363,7 @@ export class Game {
     this.network?.sendSave(
       this.basedCount,
       discovered,
+      discoveredNPCs,
       capturedByType,
       basedCowTypes,
       this.coins,
@@ -1369,6 +1374,7 @@ export class Game {
       this.myToken,
       this.basedCount,
       discovered,
+      discoveredNPCs,
       capturedByType,
       basedCowTypes,
       this.coins,
@@ -3549,14 +3555,13 @@ export class Game {
 
   // ── Botão do livro (top-right) ────────────────────────────────────────────
 
-
-
-
   private onPeriodChange() {
     setNightMode(this.isNight);
   }
 
-  private toggleMusic() { toggleMusic(); }
+  private toggleMusic() {
+    toggleMusic();
+  }
 
   private renderMusicButton(W: number) {
     const { ctx } = this;
@@ -4301,10 +4306,24 @@ export class Game {
     const W = canvas.width,
       H = canvas.height;
     const d = this.vendorDialog;
-    const bw = Math.min(W - 32, 420),
-      bh = 130;
-    const bx = W / 2 - bw / 2,
-      by = H - bh - 24;
+
+    // Posição do vendedor na tela
+    const vendorScreen = this.isoToScreen(VENDOR_COL, VENDOR_ROW);
+    const bw = Math.min(W - 32, 320),
+      bh = 110;
+
+    // Posiciona a caixa acima da cabeça do vendedor
+    let bx = vendorScreen.x - bw / 2;
+    let by = vendorScreen.y - 64 - bh - 30; // acima do sprite
+
+    // Garante que não saia da tela
+    bx = Math.max(16, Math.min(W - bw - 16, bx));
+    by = Math.max(16, by);
+
+    // Se ficar muito pra cima, coloca embaixo do vendedor
+    if (by < 16) {
+      by = vendorScreen.y + 20;
+    }
 
     // Retro box: dark border + scanline-ish fill
     ctx.fillStyle = "#0a0a10";
@@ -4349,12 +4368,13 @@ export class Game {
       const blink = Math.floor(this.time * 2) % 2 === 0;
       if (blink) {
         ctx.fillStyle = "#FFD700";
-        ctx.font = "bold 11px monospace";
+        ctx.font = "bold 3px monospace";
         ctx.textAlign = "right";
         ctx.fillText(
           "[ E / clique para continuar ]",
           bx + bw - 14,
           by + bh - 12,
+          
         );
       }
     } else {
@@ -5152,9 +5172,28 @@ export class Game {
       ctx.fill();
     }
 
-    // Moeda animada acima do sprite
+    // Tag de nome acima da cabeça
+    const headTop = y - SH + 12; // topo do sprite
+    const nameText = "🛒 Vendedor";
+    ctx.font = "bold 11px sans-serif";
+    ctx.textAlign = "center";
+    const nameW = ctx.measureText(nameText).width + 16;
+    const nameTagY = headTop - 8; // logo acima do sprite
+    // Fundo escuro com borda dourada
+    ctx.fillStyle = "rgba(10, 8, 20, 0.80)";
+    ctx.beginPath();
+    (ctx as any).roundRect(x - nameW / 2, nameTagY - 14, nameW, 17, 5);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(255, 215, 0, 0.85)";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    // Texto
+    ctx.fillStyle = "#FFE566";
+    ctx.fillText(nameText, x, nameTagY);
+
+    // Moeda animada acima do nome
     const coinBob = Math.sin(this.time * 2) * 2;
-    const coinY = y - SH + 12 - 10 + coinBob;
+    const coinY = nameTagY - 20 + coinBob;
     ctx.fillStyle = "#FFD700";
     ctx.beginPath();
     ctx.arc(x, coinY, 7, 0, Math.PI * 2);
@@ -5162,18 +5201,12 @@ export class Game {
     ctx.strokeStyle = "#a07000";
     ctx.lineWidth = 1.5;
     ctx.stroke();
-    ctx.fillStyle = "#a07000";
+    ctx.fillStyle = "#7a5000";
     ctx.font = "bold 8px sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText("$", x, coinY);
     ctx.textBaseline = "alphabetic";
-
-    // Nome "Vendedor"
-    ctx.font = "bold 10px sans-serif";
-    ctx.textAlign = "center";
-    ctx.fillStyle = "#FFD700";
-    ctx.fillText("Vendedor", x, coinY - 12);
 
     // Anel de interação quando player está perto
     if (this.isAtVendor() && !this.shopOpen) {

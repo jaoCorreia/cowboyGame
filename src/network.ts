@@ -105,9 +105,9 @@ export class Network {
     this.ws.send(JSON.stringify({ type: "chat", text }));
   }
 
-  sendSave(basedCount: number, discovered: string[], capturedByType: Record<string, number>, basedCowTypes: string[], coins: number, inventory: Record<string, number>) {
+  sendSave(basedCount: number, discovered: string[], discoveredNPCs: string[], capturedByType: Record<string, number>, basedCowTypes: string[], coins: number, inventory: Record<string, number>) {
     if (!this.ready || !this.ws) return;
-    this.ws.send(JSON.stringify({ type: "save", basedCount, discovered, capturedByType, basedCowTypes, coins, inventory }));
+    this.ws.send(JSON.stringify({ type: "save", basedCount, discovered, discoveredNPCs, capturedByType, basedCowTypes, coins, inventory }));
   }
 
   sendTradeOffer(toId: string, itemId: string, level: number) {

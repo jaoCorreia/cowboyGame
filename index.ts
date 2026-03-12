@@ -36,6 +36,7 @@ interface UserDoc {
   color: string;
   basedCount: number;
   discoveredTypes: string[];
+  discoveredNPCs: string[];
   capturedByType: Record<string, number>;
   basedCows: string[];
   coins: number;
@@ -146,6 +147,7 @@ server = Bun.serve<WsData>({
         color,
         basedCount: 0,
         discoveredTypes: [],
+        discoveredNPCs: [],
         capturedByType: {},
         basedCows: [],
         coins: 0,
@@ -162,6 +164,7 @@ server = Bun.serve<WsData>({
         color,
         basedCount: 0,
         discovered: [],
+        discoveredNPCs: [],
         capturedByType: {},
         basedCows: [],
         coins: 0,
@@ -225,6 +228,7 @@ server = Bun.serve<WsData>({
         color: row.color,
         basedCount: row.basedCount ?? 0,
         discovered: row.discoveredTypes ?? [],
+        discoveredNPCs: row.discoveredNPCs ?? [],
         capturedByType: row.capturedByType ?? {},
         basedCows: row.basedCows ?? [],
         coins: row.coins ?? 0,
@@ -255,6 +259,7 @@ server = Bun.serve<WsData>({
         color: row.color,
         basedCount: row.basedCount ?? 0,
         discovered: row.discoveredTypes ?? [],
+        discoveredNPCs: row.discoveredNPCs ?? [],
         capturedByType: row.capturedByType ?? {},
         basedCows: row.basedCows ?? [],
         coins: row.coins ?? 0,
@@ -269,6 +274,7 @@ server = Bun.serve<WsData>({
         token?: string;
         basedCount?: number;
         discovered?: string[];
+        discoveredNPCs?: string[];
         capturedByType?: Record<string, number>;
         basedCowTypes?: string[];
         coins?: number;
@@ -283,6 +289,7 @@ server = Bun.serve<WsData>({
           $set: {
             basedCount: body.basedCount ?? 0,
             discoveredTypes: body.discovered ?? [],
+            discoveredNPCs: body.discoveredNPCs ?? [],
             capturedByType: body.capturedByType ?? {},
             basedCows: Array.isArray(body.basedCowTypes)
               ? body.basedCowTypes
@@ -481,6 +488,7 @@ server = Bun.serve<WsData>({
               $set: {
                 basedCount: u.basedCount ?? 0,
                 discoveredTypes: u.discovered ?? [],
+                discoveredNPCs: u.discoveredNPCs ?? [],
                 capturedByType: u.capturedByType ?? {},
                 basedCows: Array.isArray(u.basedCowTypes)
                   ? u.basedCowTypes
