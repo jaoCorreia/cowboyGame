@@ -61,11 +61,11 @@ const NPC_ENTRIES: NPCEntry[] = [
   },
   {
     id: "ladrao_culto",
-    name: "???",
-    role: "???",
+    name: "Ladrão do Culto",
+    role: "Ladrão de Gado",
     description:
-      "Uma figura sinistra avistada nas sombras do mapa. Dizem que lidera um culto misterioso e rouba gado em plena luz do dia. Ninguém sabe ao certo quem é — ou o que vestem (ou não vestem).",
-    spriteKey: "npcs/saler.png",
+      "Membro de um culto de nudismo cujo principal ritual é roubar gado alheio. Aparece de noite e some antes do amanhecer. O grau de nudismo é variável e, francamente, desconcertante.",
+    spriteKey: "npcs/bandit/Unarmed_Idle_without_shadow.png",
   },
 ];
 
@@ -77,7 +77,7 @@ interface Player {
   moving: boolean;
 }
 
-type CowState = "wandering" | "fleeing" | "lassoed" | "captured" | "based";
+type CowState = "wandering" | "fleeing" | "lassoed" | "captured" | "based" | "stolen";
 
 interface Cow {
   id: number;
@@ -123,6 +123,23 @@ interface StakeData {
   pullT: number;
   pullDist: number;
 }
+
+// ── Bandit constants ──────────────────────────────────────────────────────────
+const BANDIT_APPROACH_SPEED = 1.6;
+const BANDIT_FLEE_SPEED = 2.4;
+const BANDIT_SCARED_SPEED = 3.8;
+const BANDIT_TUG_DECAY = 1.1; // units/sec pulled back by bandit automatically
+
+interface Bandit {
+  id: number;
+  col: number;
+  row: number;
+  fleeCol: number;
+  fleeRow: number;
+  state: "approaching" | "fleeing" | "scared";
+  targetCow: Cow | null;
+}
+
 
 function dist(
   a: { col: number; row: number },
@@ -177,7 +194,8 @@ export class Game {
   private lastTime = 0;
   private time = 0;
   private prevIsNight = false;
-  private readonly DEBUG_FORCE_PERIOD: "manha" | "tarde" | "noite" | null = null;
+  private readonly DEBUG_FORCE_PERIOD: "manha" | "tarde" | "noite" | null =
+    null;
   private isPreview = false;
   private rafId = 0;
   private network?: Network;
@@ -198,6 +216,13 @@ export class Game {
   private chatOpen = false;
   private chatInput?: HTMLInputElement;
   private bookOpen = false;
+  private bandits: Bandit[] = [];
+  private nextBanditId = 0;
+  private banditSpawnTimer = 60;
+  private banditAnimFrame = 0;
+  private banditAnimTimer = 0;
+  // 'manha' incluído para teste — remover após validação
+  private readonly BANDIT_ACTIVE_PERIODS: ReadonlyArray<"manha" | "tarde" | "noite"> = ["noite"];
   private bookPage = 0; // page index currently displayed
   private bookPageTarget = 0; // page we are flipping towards
   private bookPageAnimT = 1; // 0 = flip in progress, 1 = settled
@@ -587,6 +612,10 @@ export class Game {
         sprites.get(`player/run/${dir}/frame_00${f}.png`);
       }
     }
+    // Bandit sprite sheets
+    sprites.get("npcs/bandit/Unarmed_Walk_without_shadow.png");
+    sprites.get("npcs/bandit/Unarmed_Run_without_shadow.png");
+    sprites.get("npcs/bandit/Unarmed_Idle_without_shadow.png");
   }
 
   private setupInput() {
@@ -595,6 +624,7 @@ export class Game {
       this.keys.add(e.key.toLowerCase());
       if (e.key === " " || e.key.toLowerCase() === "e") this.handleAction();
       if (e.key.toLowerCase() === "b") this.toggleBook();
+      if (e.key === "F5") { e.preventDefault(); this.debugSpawnBandit(); }
       if (e.key.toLowerCase() === "q") this.toggleStakeAim();
       if (this.bookOpen) {
         if (e.key === "ArrowRight" || e.key === "ArrowDown") {
@@ -1048,6 +1078,15 @@ export class Game {
       return;
     }
     if (this.lasso.active) return;
+    // Scare bandit if close — drops cow and flees
+    const nearBandit = this.bandits.find(
+      (b) => b.state === "fleeing" && dist(this.player, b) <= 3.5,
+    );
+    if (nearBandit) {
+      if (nearBandit.targetCow) { nearBandit.targetCow.state = "wandering"; nearBandit.targetCow = null; }
+      nearBandit.state = "scared";
+      return;
+    }
     if (this.isAtVendor()) {
       this.shopOpen = true;
       this.discoveredNPCs.add("vendedor");
@@ -1167,6 +1206,9 @@ export class Game {
     } else {
       this.updateLasso(dt);
     }
+
+    // Bandits
+    this.updateBandits(dt);
 
     // Trade result timer
     if (this.tradeState === "result" && this.tradeResultTimer > 0) {
@@ -1807,6 +1849,7 @@ export class Game {
     this.renderEntities();
     this.renderLasso();
     this.renderStake();
+    this.renderBandits();
     this.renderNightOverlay();
     if (this.bookOpen) this.renderBook();
     else this.renderUI();
@@ -2614,7 +2657,7 @@ export class Game {
     const prevAlpha = ctx.globalAlpha;
     if (isTranslucent) {
       // Vacas translúcidas noturnas ficam mais visíveis à noite
-      const baseAlpha = t.nightOnly ? 0.70 + this.nightFade * 0.15 : 0.55;
+      const baseAlpha = t.nightOnly ? 0.7 + this.nightFade * 0.15 : 0.55;
       ctx.globalAlpha = baseAlpha + Math.sin(this.time * 2 + cow.id) * 0.1;
     }
 
@@ -2762,7 +2805,7 @@ export class Game {
       ctx.fillStyle = "rgba(50,200,50,0.95)";
       ctx.font = "14px sans-serif";
       ctx.fillText("✓", x, cy - 28);
-    } else if (cow.state === "based") {
+    } else if (cow.state === "based" || cow.state === "stolen") {
       ctx.font = "11px sans-serif";
       ctx.fillText("🏠", x, cy - 26);
     } else if (cow.state === "wandering" && cow.type.fearDistance > 0) {
@@ -2964,7 +3007,14 @@ export class Game {
     ctx.fillRect(0, 0, W, H);
 
     // Névoa roxa nas bordas (atmosfera noturna)
-    const grad = ctx.createRadialGradient(W / 2, H / 2, H * 0.3, W / 2, H / 2, H * 0.85);
+    const grad = ctx.createRadialGradient(
+      W / 2,
+      H / 2,
+      H * 0.3,
+      W / 2,
+      H / 2,
+      H * 0.85,
+    );
     grad.addColorStop(0, "rgba(0,0,0,0)");
     grad.addColorStop(1, `rgba(20,0,40,${nightFade * 0.18})`);
     ctx.fillStyle = grad;
@@ -2979,9 +3029,15 @@ export class Game {
     for (let i = 0; i < 110; i++) {
       const sx = ((i * 137 + 19) % 97) / 97;
       const sy = ((i * 251 + 43) % 89) / 89;
-      const twinkle = 0.3 + Math.sin(this.time * (0.8 + (i % 7) * 0.25) + i) * 0.4;
+      const twinkle =
+        0.3 + Math.sin(this.time * (0.8 + (i % 7) * 0.25) + i) * 0.4;
       const sz = 0.5 + (i % 4) * 0.45;
-      const hue = i % 3 === 0 ? "220,230,255" : i % 3 === 1 ? "255,255,220" : "255,240,200";
+      const hue =
+        i % 3 === 0
+          ? "220,230,255"
+          : i % 3 === 1
+            ? "255,255,220"
+            : "255,240,200";
       ctx.fillStyle = `rgba(${hue},${nightFade * twinkle})`;
       ctx.beginPath();
       ctx.arc(sx * W, sy * skyH, sz, 0, Math.PI * 2);
@@ -2996,7 +3052,14 @@ export class Game {
     ctx.save();
     ctx.globalAlpha = nightFade;
     // Brilho suave ao redor da lua
-    const moonGlow = ctx.createRadialGradient(moonX, moonY, moonR, moonX, moonY, moonR * 3.5);
+    const moonGlow = ctx.createRadialGradient(
+      moonX,
+      moonY,
+      moonR,
+      moonX,
+      moonY,
+      moonR * 3.5,
+    );
     moonGlow.addColorStop(0, "rgba(240,230,180,0.18)");
     moonGlow.addColorStop(1, "rgba(240,230,180,0)");
     ctx.fillStyle = moonGlow;
@@ -3027,6 +3090,8 @@ export class Game {
     this.renderInventoryButton(W, H);
     this.renderChat(W, H);
     if (this.inventoryOpen) this.renderInventory(W, H);
+
+    // ── Bandit tug-of-war ─────────────────────────────────────────────────────
 
     // ── Lasso minigame or fail overlay ───────────────────────────────────────
     if (this.lasso.active && this.lasso.phase === "pulling")
@@ -3811,7 +3876,266 @@ export class Game {
     ctx.fillText(hint, W / 2, H - 94);
   }
 
-  private renderMinigame() {
+  // ─── Bandido ──────────────────────────────────────────────────────────────
+
+  private debugSpawnBandit() {
+    const target = this.cows.find(c => c.state === "based") ?? this.cows.find(c => c.state === "wandering");
+    if (!target) { console.warn("[bandit] sem vaca alvo"); return; }
+    // Spawn close to target cow, just slightly away
+    const spawnCol = target.col + 8;
+    const spawnRow = target.row + 8;
+    const fleeCol = MAP_COLS - 2;
+    const fleeRow = MAP_ROWS - 2;
+    this.bandits.push({ id: this.nextBanditId++, col: spawnCol, row: spawnRow, fleeCol, fleeRow, state: "approaching", targetCow: target });
+  }
+
+  private spawnBandit() {
+    const based = this.cows.filter(c => c.state === "based");
+    const wandering = based.length > 0
+      ? based
+      : this.cows.filter(c => c.state === "wandering" || c.state === "fleeing");
+    if (wandering.length === 0) return;
+    const target = wandering[Math.floor(Math.random() * wandering.length)]!;
+
+    // Spawn at the map edge closest to the target cow
+    // (so the bandit doesn't have to cross the whole map)
+    const edgeCandidates: Array<{ col: number; row: number }> = [
+      { col: target.col, row: 1 },
+      { col: target.col, row: MAP_ROWS - 2 },
+      { col: 1, row: target.row },
+      { col: MAP_COLS - 2, row: target.row },
+    ];
+    edgeCandidates.sort((a, b) => dist(a, target) - dist(b, target));
+    const spawn = edgeCandidates[0]!;
+
+    // Flee destination: opposite edge from spawn (so he runs away from base)
+    const fleeCol = spawn.col < MAP_COLS / 2 ? MAP_COLS - 2 : 1;
+    const fleeRow = spawn.row < MAP_ROWS / 2 ? MAP_ROWS - 2 : 1;
+
+    this.bandits.push({
+      id: this.nextBanditId++,
+      col: spawn.col,
+      row: spawn.row,
+      fleeCol,
+      fleeRow,
+      state: "approaching",
+      targetCow: target,
+    });
+  }
+
+
+  private updateBandits(dt: number) {
+    const period = this.timePeriod;
+
+    // Advance bandit animation (always, not only during tug)
+    this.banditAnimTimer += dt;
+    if (this.banditAnimTimer >= 0.12) {
+      this.banditAnimTimer = 0;
+      this.banditAnimFrame++;
+    }
+
+    // If player is very close to a fleeing bandit, auto-scare (proximity mechanic)
+    for (const b of this.bandits) {
+      if (b.state === "fleeing" && dist(this.player, b) <= 2.5) {
+        if (b.targetCow) { b.targetCow.state = "wandering"; b.targetCow = null; }
+        b.state = "scared";
+      }
+    }
+
+    // Update each bandit
+    for (let i = this.bandits.length - 1; i >= 0; i--) {
+      const b = this.bandits[i]!;
+
+      if (b.state === "approaching") {
+        const target = b.targetCow;
+        // If target became invalid, flee empty
+        if (!target || (target.state !== "wandering" && target.state !== "fleeing" && target.state !== "based")) {
+          b.state = "scared";
+          b.targetCow = null;
+        } else {
+          const dx = target.col - b.col;
+          const dy = target.row - b.row;
+          const d = Math.sqrt(dx * dx + dy * dy);
+          if (d < 1.2) {
+            // Steal cow — update flee destination to edge opposite from current pos
+            target.state = "stolen";
+            b.state = "fleeing";
+            b.fleeCol = b.col < MAP_COLS / 2 ? MAP_COLS - 2 : 1;
+            b.fleeRow = b.row < MAP_ROWS / 2 ? MAP_ROWS - 2 : 1;
+            this.discoveredNPCs.add("ladrao_culto");
+          } else {
+            b.col += (dx / d) * BANDIT_APPROACH_SPEED * dt;
+            b.row += (dy / d) * BANDIT_APPROACH_SPEED * dt;
+          }
+        }
+      } else if (b.state === "fleeing") {
+        const dx = b.fleeCol - b.col;
+        const dy = b.fleeRow - b.row;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        if (d < 2) {
+          // Escaped — remove bandit and stolen cow
+          if (b.targetCow) {
+            this.cows = this.cows.filter((c) => c !== b.targetCow);
+          }
+          this.bandits.splice(i, 1);
+          continue;
+        }
+        const spd = BANDIT_FLEE_SPEED * dt;
+        b.col += (dx / d) * spd;
+        b.row += (dy / d) * spd;
+        if (b.targetCow) {
+          b.targetCow.col = b.col;
+          b.targetCow.row = b.row;
+        }
+      } else if (b.state === "scared") {
+        const dx = b.fleeCol - b.col;
+        const dy = b.fleeRow - b.row;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        if (d < 2) {
+          this.bandits.splice(i, 1);
+          continue;
+        }
+        const spd = BANDIT_SCARED_SPEED * dt;
+        b.col += (dx / d) * spd;
+        b.row += (dy / d) * spd;
+      }
+    }
+
+    // Spawn timer — only in active periods and when no bandit already on map
+    if (this.BANDIT_ACTIVE_PERIODS.includes(period) && this.bandits.length === 0) {
+      this.banditSpawnTimer -= dt;
+      if (this.banditSpawnTimer <= 0) {
+        this.spawnBandit();
+        // Respawn 2-3min after escape (random so it feels natural)
+        this.banditSpawnTimer = 120 + Math.random() * 60;
+      }
+    }
+  }
+
+  private renderBandits() {
+    for (const b of this.bandits) {
+      this.drawBandit(b);
+    }
+
+    // Hint when close
+    const near = this.bandits.find(b => b.state === "fleeing" && dist(this.player, b) <= 4.5);
+    if (near) {
+      const { ctx } = this;
+      const { x, y } = this.isoToScreen(near.col, near.row);
+      ctx.fillStyle = "#FFD700";
+      ctx.font = "bold 11px sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("E / Espaço — Espantar!", x, y - 52);
+    }
+  }
+
+  private drawBandit(b: Bandit) {
+    const { ctx } = this;
+    const { x, y } = this.isoToScreen(b.col, b.row);
+
+    const FRAME_W = 64, FRAME_H = 64;
+
+    // Cow dragged BEHIND bandit (like herd cow) — draw before bandit so bandit renders on top
+    if (b.targetCow && (b.state === "fleeing" || b.state === "scared")) {
+      // Direction bandit is moving
+      const mdx = b.fleeCol - b.col;
+      const mdy = b.fleeRow - b.row;
+      const md = Math.sqrt(mdx * mdx + mdy * mdy);
+      // Offset cow 1.8 tiles behind bandit (opposite direction of movement)
+      const offCol = md > 0.1 ? -(mdx / md) * 1.8 : -1.8;
+      const offRow = md > 0.1 ? -(mdy / md) * 1.8 : 0;
+      const cp = this.isoToScreen(b.col + offCol, b.row + offRow);
+
+      // Rope (lasso style — catenary-ish curve)
+      ctx.save();
+      ctx.strokeStyle = "rgba(180,120,40,0.85)";
+      ctx.lineWidth = 2;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      const midX = (x + cp.x) / 2;
+      const midY = (y + cp.y) / 2 + 10; // slight sag
+      ctx.moveTo(x + (cp.x - x) * 0.1, y - 8);
+      ctx.quadraticCurveTo(midX, midY, cp.x, cp.y - 4);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+
+      // Cow shadow
+      ctx.fillStyle = "rgba(0,0,0,0.18)";
+      ctx.beginPath();
+      ctx.ellipse(cp.x, cp.y + 2, 11, 4, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Cow (slightly smaller, behind bandit)
+      ctx.save();
+      ctx.translate(cp.x, cp.y);
+      ctx.scale(0.72, 0.72);
+      this.drawCowAt(0, 0, b.targetCow.type);
+      ctx.restore();
+    }
+
+    // Shadow
+    ctx.fillStyle = "rgba(0,0,0,0.28)";
+    ctx.beginPath();
+    ctx.ellipse(x, y + 2, 13, 5, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Pick sprite sheet + frame count based on state
+    let sheetKey: string;
+    let totalCols: number;
+    if (b.state === "fleeing" || b.state === "scared") {
+      sheetKey = "npcs/bandit/Unarmed_Run_without_shadow.png";
+      totalCols = 8;
+    } else {
+      sheetKey = "npcs/bandit/Unarmed_Walk_without_shadow.png";
+      totalCols = 6;
+    }
+
+    const col = this.banditAnimFrame % totalCols;
+    // Use row 2 (east-facing) by default, looks better in isometric view
+    const dirRow = 2;
+    const srcX = col * FRAME_W;
+    const srcY = dirRow * FRAME_H;
+
+    const img = sprites.get(sheetKey);
+    ctx.save();
+    // Mirror sprite when fleeing to the left
+    const movingLeft = b.fleeCol < b.col;
+    if ((b.state === "scared" || b.state === "fleeing") && movingLeft) {
+      ctx.translate(x * 2, 0);
+      ctx.scale(-1, 1);
+    }
+    if (img) {
+      ctx.drawImage(img, srcX, srcY, FRAME_W, FRAME_H, x - FRAME_W / 2, y - FRAME_H + 10, FRAME_W, FRAME_H);
+    } else {
+      // Canvas fallback while sprite loads
+      ctx.fillStyle = "#d4946a";
+      ctx.fillRect(x - 7, y - 28, 14, 18);
+      ctx.fillStyle = "#1a1a3a";
+      ctx.fillRect(x - 8, y - 14, 16, 8);
+      ctx.fillStyle = "#d4946a";
+      ctx.beginPath();
+      ctx.arc(x, y - 35, 8, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#8a1010";
+      ctx.fillRect(x - 8, y - 40, 16, 7);
+    }
+    ctx.restore();
+
+    // Label above
+    ctx.font = "bold 9px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillStyle =
+      b.state === "scared" ? "#aaffaa" :
+      b.state === "fleeing" ? "#ff6060" : "#ffcc44";
+    const label =
+      b.state === "scared" ? "😱 fugindo!" :
+      b.state === "fleeing" ? "🏃 com a vaca!" : "🤫 se aproximando";
+    ctx.fillText(label, x, y - FRAME_H + 4);
+  }
+
+
+    private renderMinigame() {
     const { ctx, canvas, lasso } = this;
     const W = canvas.width,
       H = canvas.height;
