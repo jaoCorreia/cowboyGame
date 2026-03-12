@@ -1,13 +1,12 @@
 import { Game } from "./game";
 import { initAuth } from "./auth";
+import { initMusic } from "./music";
 
 const canvas = document.getElementById("game") as HTMLCanvasElement;
 
-// Inicia o jogo em modo preview (sem rede) para aparecer atrás da tela de login
+initMusic(); // starts on first user gesture, survives game restarts
+
 const preview = new Game(canvas, null);
-
 const userData = await initAuth();
-
-// Login concluído: destrói o preview e inicia o jogo de verdade
 preview.destroy();
 new Game(canvas, userData);

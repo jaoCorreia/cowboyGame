@@ -310,6 +310,13 @@ server = Bun.serve<WsData>({
       return new Response("Not Found", { status: 404 });
     },
 
+    "/sounds/*": async (req: Request) => {
+      const url = new URL(req.url);
+      const file = Bun.file("./public" + url.pathname);
+      if (await file.exists()) return new Response(file);
+      return new Response("Not Found", { status: 404 });
+    },
+
     // ── WebSocket ─────────────────────────────────────────────────────────────
 
     "/ws": (req: Request) => {

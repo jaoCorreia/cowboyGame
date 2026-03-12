@@ -38,6 +38,7 @@ function basedSlotPos(slot: number) {
 import { type Tile, type TileType, generateMap, isObstacle } from "./mapGen";
 import { type CowType, COW_TYPES, randomCowType } from "./cowTypes";
 import { sprites } from "./sprites";
+import { toggleMusic, isMusicEnabled, setNightMode } from "./music";
 import { Network, type RemotePlayer, type ChatMessage } from "./network";
 import { type UserData, saveGameState } from "./auth";
 import { type GameItem, SHOP_ITEMS, itemNextPrice } from "./items";
@@ -251,14 +252,6 @@ export class Game {
     done: boolean;
   } = { active: false, text: "", displayed: 0, timer: 0, done: false };
   private vendorMet = false;
-  private musicEnabled = true;
-  private dayTrackIndex = 0; // 0=main, 1=second — alternates each loop
-  private musicAudio: {
-    main: HTMLAudioElement;
-    second: HTMLAudioElement;
-    night: HTMLAudioElement;
-  } | null = null;
-  private musicCurrent: "main" | "second" | "night" | null = null;
   private shopTab: "sell" | "buy" = "sell";
   private shopSellButtons: Array<{
     cow: Cow;
@@ -450,7 +443,6 @@ export class Game {
     this.resize();
     window.addEventListener("resize", () => this.resize());
     this.preloadPlayerSprites();
-    this.initMusic();
 
     if (!this.isPreview) {
       // Rede multiplayer
@@ -3557,80 +3549,14 @@ export class Game {
 
   // ── Botão do livro (top-right) ────────────────────────────────────────────
 
-  private initMusic() {
-    if (typeof window === "undefined") return;
-    const make = (file: string) => {
-      const a = new Audio("/sounds/soundtrack/" + file);
-      a.loop = false;
-      a.volume = 0.55;
-      return a;
-    };
-    this.musicAudio = {
-      main: make("main.wav"),
-      second: make("second.wav"),
-      night: make("night.wav"),
-    };
-    this.musicAudio.main.addEventListener("ended",   () => this.onTrackEnded());
-    this.musicAudio.second.addEventListener("ended", () => this.onTrackEnded());
-    this.musicAudio.night.addEventListener("ended",  () => this.onTrackEnded());
-    // Browser blocks autoplay until first user gesture — start on first interaction
-    const startOnce = () => {
-      if (!this.musicEnabled) return;
-      this.playTrack(this.isNight ? "night" : "main");
-      window.removeEventListener("pointerdown", startOnce);
-      window.removeEventListener("keydown", startOnce);
-    };
-    window.addEventListener("pointerdown", startOnce);
-    window.addEventListener("keydown", startOnce);
-  }
 
-  private playTrack(name: "main" | "second" | "night") {
-    if (!this.musicAudio || !this.musicEnabled) return;
-    // Stop all
-    for (const t of ["main", "second", "night"] as const) {
-      this.musicAudio[t].pause();
-      this.musicAudio[t].currentTime = 0;
-    }
-    this.musicCurrent = name;
-    this.musicAudio[name].play().catch(() => {
-      /* autoplay blocked */
-    });
-  }
 
-  private onTrackEnded() {
-    if (!this.musicEnabled) return;
-    if (this.isNight) {
-      // Night loops itself
-      this.playTrack("night");
-    } else {
-      // Alternate main ↔ second
-      this.dayTrackIndex = 1 - this.dayTrackIndex;
-      this.playTrack(this.dayTrackIndex === 0 ? "main" : "second");
-    }
-  }
 
   private onPeriodChange() {
-    if (!this.musicEnabled || !this.musicAudio) return;
-    if (this.isNight) {
-      this.playTrack("night");
-    } else {
-      // Resume day cycle from whichever track is next
-      this.playTrack(this.dayTrackIndex === 0 ? "main" : "second");
-    }
+    setNightMode(this.isNight);
   }
 
-  private toggleMusic() {
-    this.musicEnabled = !this.musicEnabled;
-    if (!this.musicAudio) return;
-    if (!this.musicEnabled) {
-      for (const t of ["main", "second", "night"] as const)
-        this.musicAudio[t].pause();
-    } else {
-      this.playTrack(
-        this.isNight ? "night" : this.dayTrackIndex === 0 ? "main" : "second",
-      );
-    }
-  }
+  private toggleMusic() { toggleMusic(); }
 
   private renderMusicButton(W: number) {
     const { ctx } = this;
@@ -3641,14 +3567,14 @@ export class Game {
       cy - 24,
       48,
       48,
-      this.musicEnabled ? "normal" : "pressed",
+      isMusicEnabled() ? "normal" : "pressed",
     );
     ctx.font = "20px sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText(this.musicEnabled ? "🎵" : "🔇", cx, cy);
+    ctx.fillText(isMusicEnabled() ? "🎵" : "🔇", cx, cy);
     ctx.textBaseline = "alphabetic";
-    ctx.fillStyle = this.musicEnabled ? "#FFD700" : "#888";
+    ctx.fillStyle = isMusicEnabled() ? "#FFD700" : "#888";
     ctx.font = "bold 8px sans-serif";
     ctx.textAlign = "center";
     ctx.fillText("MÚSICA", cx, cy + 20);
