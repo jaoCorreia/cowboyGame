@@ -15,9 +15,11 @@ export interface CowType {
   description: string;
   fearDistance: number;     // tiles — starts slowly backing away at this range (0 = not fearful)
   fearSpeed: number;        // tiles/sec when wary (scaled by proximity)
+  nightOnly?: boolean;      // only spawns during nighttime
 }
 
 export const COW_TYPES: CowType[] = [
+  // ── Comuns ────────────────────────────────────────────────────────────────
   {
     id: 'branca',
     name: 'Vaca Branca',
@@ -42,6 +44,7 @@ export const COW_TYPES: CowType[] = [
     description: 'Cor de caramelo derretido. Muito comum nas fazendas do interior.',
     fearDistance: 0, fearSpeed: 0,
   },
+  // ── Incomuns ──────────────────────────────────────────────────────────────
   {
     id: 'malhada',
     name: 'Vaca Malhada',
@@ -68,6 +71,32 @@ export const COW_TYPES: CowType[] = [
     fearDistance: 4, fearSpeed: 1.2,
   },
   {
+    id: 'nordestina',
+    name: 'Vaca Nordestina',
+    rarity: 'incomum',
+    weight: 9,
+    clicksNeeded: 12,
+    bodyColor: '#c8724a',
+    spotColor: '#7a3810',
+    renderStyle: 'normal',
+    description: 'Sobreviveu às secas do sertão e ao calor do meio-dia. Teimosa como um cangaceiro, mas no fundo é mansinha.',
+    fearDistance: 2, fearSpeed: 0.8,
+  },
+  {
+    id: 'junina',
+    name: 'Vaca Junina',
+    rarity: 'incomum',
+    weight: 7,
+    clicksNeeded: 12,
+    bodyColor: '#e8b832',
+    spotColor: '#c83820',
+    secondaryColor: '#2050c0',
+    renderStyle: 'spotted_color',
+    description: 'Toda enfeitada como bandeirinha de São João. Mais animada que as outras, parece que está sempre querendo dançar forró.',
+    fearDistance: 2.5, fearSpeed: 0.8,
+  },
+  // ── Raras ─────────────────────────────────────────────────────────────────
+  {
     id: 'tigrada',
     name: 'Vaca Tigrada',
     rarity: 'rara',
@@ -92,6 +121,33 @@ export const COW_TYPES: CowType[] = [
     description: 'Verde como o pampa florido na primavera. Tímida, se afasta ao sentir presença humana.',
     fearDistance: 5, fearSpeed: 1.8,
   },
+  {
+    id: 'zebu',
+    name: 'Vaca Zebu',
+    rarity: 'rara',
+    weight: 3.5,
+    clicksNeeded: 22,
+    bodyColor: '#d0c8b4',
+    spotColor: '#8a7860',
+    secondaryColor: '#b8b0a0',
+    renderStyle: 'normal',
+    description: 'A rainha das fazendas brasileiras. Tem uma corcova imponente e um olhar que julga tudo. Responsável por mais de metade do gado nacional.',
+    fearDistance: 5, fearSpeed: 1.8,
+  },
+  {
+    id: 'pantaneira',
+    name: 'Vaca Pantaneira',
+    rarity: 'rara',
+    weight: 3,
+    clicksNeeded: 22,
+    bodyColor: '#788c4a',
+    spotColor: '#3a5020',
+    secondaryColor: '#a4b870',
+    renderStyle: 'normal',
+    description: 'Nasceu nas cheias do Pantanal. Nada como peixe, some no barro como uma anta. Encontrá-la em terra firme é sinal de sorte.',
+    fearDistance: 5.5, fearSpeed: 2.0,
+  },
+  // ── Super Raras ───────────────────────────────────────────────────────────
   {
     id: 'safira',
     name: 'Vaca Safira',
@@ -118,6 +174,36 @@ export const COW_TYPES: CowType[] = [
     description: 'Translúcida e silenciosa. Recua quando sente alguém se aproximando.',
     fearDistance: 8, fearSpeed: 3.0,
   },
+  // ── Terror (apenas à noite) ───────────────────────────────────────────────
+  {
+    id: 'zumbi',
+    name: 'Vaca Zumbi',
+    rarity: 'super_rara',
+    weight: 2.5,
+    clicksNeeded: 30,
+    bodyColor: '#3a4820',
+    spotColor: '#6a2818',
+    glowColor: 'rgba(180,0,0,0.45)',
+    renderStyle: 'glowing',
+    description: 'Não tem medo. Não foge. Apenas se aproxima devagar olhando nos seus olhos. Dizem que morreu numa quinta-feira e nunca recebeu o recado.',
+    fearDistance: 0, fearSpeed: 0,
+    nightOnly: true,
+  },
+  {
+    id: 'saci',
+    name: 'Vaca Saci',
+    rarity: 'rara',
+    weight: 2.0,
+    clicksNeeded: 38,
+    bodyColor: '#1a0c04',
+    spotColor: '#c84010',
+    glowColor: 'rgba(200,60,0,0.5)',
+    renderStyle: 'translucent',
+    description: 'O espírito travesso das noites brasileiras. Aparece e some num piscar de olhos. Assobiar de noite pode atraí-la — ou afastá-la, ninguém sabe ao certo.',
+    fearDistance: 11, fearSpeed: 5.5,
+    nightOnly: true,
+  },
+  // ── Lendárias ─────────────────────────────────────────────────────────────
   {
     id: 'dourada',
     name: 'Vaca Dourada',
@@ -144,15 +230,43 @@ export const COW_TYPES: CowType[] = [
     description: 'Surgiu de outro mundo. Detecta qualquer movimento a enorme distância. Quase impossível de aproximar.',
     fearDistance: 13, fearSpeed: 4.5,
   },
+  {
+    id: 'boi_bumba',
+    name: 'Boi Bumbá',
+    rarity: 'lendaria',
+    weight: 0.18,
+    clicksNeeded: 45,
+    bodyColor: '#150808',
+    spotColor: '#cc2010',
+    glowColor: 'rgba(200,30,10,0.45)',
+    renderStyle: 'glowing',
+    description: 'Encarnação do folclore amazônico. É o espírito do Bumba Meu Boi em forma de lenda viva. Ao capturá-lo uma vez, dizem que ele sempre volta.',
+    fearDistance: 12, fearSpeed: 4.5,
+  },
+  {
+    id: 'demonizada',
+    name: 'Vaca Demonizada',
+    rarity: 'lendaria',
+    weight: 0.4,
+    clicksNeeded: 50,
+    bodyColor: '#0a0505',
+    spotColor: '#ff1010',
+    glowColor: 'rgba(255,0,0,0.65)',
+    renderStyle: 'cosmic',
+    description: 'A temperatura cai quando ela aparece. Não corre porque não precisa. Quem tenta laçar raramente conta a história.',
+    fearDistance: 0, fearSpeed: 0,
+    nightOnly: true,
+  },
 ];
 
-// Weighted random selection
-export function randomCowType(): CowType {
-  const totalWeight = COW_TYPES.reduce((s, t) => s + t.weight, 0);
+// Weighted random selection – nightMode includes nightOnly cows in the pool
+export function randomCowType(nightMode = false): CowType {
+  const pool = nightMode ? COW_TYPES : COW_TYPES.filter(t => !t.nightOnly);
+  const totalWeight = pool.reduce((s, t) => s + t.weight, 0);
   let r = Math.random() * totalWeight;
-  for (const t of COW_TYPES) {
+  for (const t of pool) {
     r -= t.weight;
     if (r <= 0) return t;
   }
-  return COW_TYPES[0]!;
+  return pool[0]!;
 }

@@ -131,7 +131,7 @@ function dist(
   return Math.sqrt((a.col - b.col) ** 2 + (a.row - b.row) ** 2);
 }
 
-function spawnCow(id: number, map: Tile[][]): Cow {
+function spawnCow(id: number, map: Tile[][], nightMode = false): Cow {
   const minC = BASE_COL + BASE_SIZE + 4;
   let col: number, row: number;
   let tries = 0;
@@ -145,7 +145,7 @@ function spawnCow(id: number, map: Tile[][]): Cow {
     col,
     row,
     state: "wandering",
-    type: randomCowType(),
+    type: randomCowType(nightMode),
     wanderTimer: Math.random() * 3,
     wanderDirCol: 0,
     wanderDirRow: 0,
@@ -176,6 +176,8 @@ export class Game {
   };
   private lastTime = 0;
   private time = 0;
+  private prevIsNight = false;
+  private readonly DEBUG_FORCE_PERIOD: "manha" | "tarde" | "noite" | null = null;
   private isPreview = false;
   private rafId = 0;
   private network?: Network;
@@ -1186,6 +1188,24 @@ export class Game {
       );
     }
 
+    // Day/night transition events
+    const nowNight = this.isNight;
+    if (this.prevIsNight && !nowNight) {
+      // Dawn: despawn wandering/fleeing nightOnly cows
+      this.cows = this.cows.filter(
+        (cow) =>
+          !cow.type.nightOnly ||
+          (cow.state !== "wandering" && cow.state !== "fleeing"),
+      );
+    }
+    if (!this.prevIsNight && nowNight) {
+      // Dusk: spawn a burst of 3 night cows immediately
+      for (let i = 0; i < 3; i++) {
+        this.cows.push(spawnCow(this.nextCowId++, this.map, true));
+      }
+    }
+    this.prevIsNight = nowNight;
+
     // Respawn de vacas a cada 45-75s, sem ultrapassar COW_COUNT ativas
     this.cowSpawnTimer -= dt;
     if (this.cowSpawnTimer <= 0) {
@@ -1197,7 +1217,7 @@ export class Game {
           c.state === "captured",
       ).length;
       if (active < COW_COUNT) {
-        this.cows.push(spawnCow(this.nextCowId++, this.map));
+        this.cows.push(spawnCow(this.nextCowId++, this.map, this.isNight));
       }
       this.cowSpawnTimer = 45 + Math.random() * 30;
     }
@@ -1554,6 +1574,41 @@ export class Game {
     return Math.max(1, base - (this.inventory.get("lasso_forte") ?? 0) * 3);
   }
 
+  /** Hora atual no fuso de Brasília (UTC-3), com decimais de minutos */
+  private get realHourBRT(): number {
+    const now = new Date();
+    return ((now.getUTCHours() - 3 + 24) % 24) + now.getUTCMinutes() / 60;
+  }
+
+  /** 'manha' 6-12h | 'tarde' 12-18h | 'noite' 18-6h (horário de Brasília) */
+  private get timePeriod(): "manha" | "tarde" | "noite" {
+    if (this.DEBUG_FORCE_PERIOD !== null) return this.DEBUG_FORCE_PERIOD;
+    const h = this.realHourBRT;
+    if (h >= 18 || h < 6) return "noite";
+    if (h < 12) return "manha";
+    return "tarde";
+  }
+
+  /** 0 = dia pleno, 1 = noite plena — transição suave de 30 min */
+  private get nightFade(): number {
+    if (this.DEBUG_FORCE_PERIOD === "noite") return 1;
+    if (this.DEBUG_FORCE_PERIOD === "tarde") return 0;
+    if (this.DEBUG_FORCE_PERIOD === "manha") return 0;
+    const h = this.realHourBRT;
+    // Dawn: 5:30–6:30 → fade 1→0
+    if (h >= 5.5 && h < 6.5) return 1 - (h - 5.5);
+    // Full day: 6:30–17:30
+    if (h >= 6.5 && h < 17.5) return 0;
+    // Dusk: 17:30–18:30 → fade 0→1
+    if (h >= 17.5 && h < 18.5) return h - 17.5;
+    // Full night: 18:30–5:30
+    return 1;
+  }
+
+  private get isNight(): boolean {
+    return this.timePeriod === "noite";
+  }
+
   private get effectiveHerdCapacity() {
     if ((this.inventory.get("corda_aco") ?? 0) >= 1) return 5;
     return 1 + (this.inventory.get("lasso_extra") ?? 0);
@@ -1752,6 +1807,7 @@ export class Game {
     this.renderEntities();
     this.renderLasso();
     this.renderStake();
+    this.renderNightOverlay();
     if (this.bookOpen) this.renderBook();
     else this.renderUI();
     if (this.shopOpen) this.renderShop();
@@ -2556,19 +2612,38 @@ export class Game {
 
     const isTranslucent = t.renderStyle === "translucent";
     const prevAlpha = ctx.globalAlpha;
-    if (isTranslucent)
-      ctx.globalAlpha = 0.55 + Math.sin(this.time * 2 + cow.id) * 0.1;
+    if (isTranslucent) {
+      // Vacas translúcidas noturnas ficam mais visíveis à noite
+      const baseAlpha = t.nightOnly ? 0.70 + this.nightFade * 0.15 : 0.55;
+      ctx.globalAlpha = baseAlpha + Math.sin(this.time * 2 + cow.id) * 0.1;
+    }
 
     // Glow / cosmic halo
     if (t.renderStyle === "glowing" || t.renderStyle === "cosmic") {
+      const nightBoost = t.nightOnly ? 1 + this.nightFade * 2.2 : 1;
       const pulse = 0.5 + Math.sin(this.time * 3 + cow.id) * 0.3;
+      // Vacas noturnas: halo externo extra
+      if (t.nightOnly && this.nightFade > 0) {
+        ctx.fillStyle = t.glowColor ?? "rgba(255,0,0,0.15)";
+        ctx.beginPath();
+        ctx.ellipse(
+          x,
+          cy - 10,
+          (48 + pulse * 10) * nightBoost,
+          (30 + pulse * 7) * nightBoost,
+          0,
+          0,
+          Math.PI * 2,
+        );
+        ctx.fill();
+      }
       ctx.fillStyle = t.glowColor ?? "rgba(255,215,0,0.3)";
       ctx.beginPath();
       ctx.ellipse(
         x,
         cy - 10,
-        32 + pulse * 6,
-        20 + pulse * 4,
+        (32 + pulse * 6) * (t.nightOnly ? 1 + this.nightFade * 0.8 : 1),
+        (20 + pulse * 4) * (t.nightOnly ? 1 + this.nightFade * 0.8 : 1),
         0,
         0,
         Math.PI * 2,
@@ -2838,6 +2913,109 @@ export class Game {
 
   // ─── HUD / UI ─────────────────────────────────────────────────────────────
 
+  // ─── Time-of-day overlay ──────────────────────────────────────────────────
+
+  private renderNightOverlay() {
+    const { ctx, canvas } = this;
+    const W = canvas.width,
+      H = canvas.height;
+    const period = this.timePeriod;
+    const nightFade = this.nightFade;
+
+    // ── Tarde: tint quente alaranjado ────────────────────────────────────────
+    if (period === "tarde") {
+      ctx.fillStyle = "rgba(200,100,20,0.10)";
+      ctx.fillRect(0, 0, W, H);
+
+      // Sol (canto superior direito)
+      const sunX = W * 0.87,
+        sunY = H * 0.09;
+      ctx.save();
+      ctx.globalAlpha = 0.55;
+      // Raios do sol
+      ctx.strokeStyle = "rgba(255,200,40,0.35)";
+      ctx.lineWidth = 2;
+      for (let i = 0; i < 8; i++) {
+        const angle = (i / 8) * Math.PI * 2 + this.time * 0.3;
+        const r1 = 18,
+          r2 = 28;
+        ctx.beginPath();
+        ctx.moveTo(sunX + Math.cos(angle) * r1, sunY + Math.sin(angle) * r1);
+        ctx.lineTo(sunX + Math.cos(angle) * r2, sunY + Math.sin(angle) * r2);
+        ctx.stroke();
+      }
+      ctx.fillStyle = "#ffe060";
+      ctx.beginPath();
+      ctx.arc(sunX, sunY, 14, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#fff4a0";
+      ctx.beginPath();
+      ctx.arc(sunX, sunY, 9, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      return;
+    }
+
+    // ── Noite: overlay escuro, estrelas e lua ────────────────────────────────
+    if (nightFade <= 0) return;
+
+    // Tint azul-escuro
+    ctx.fillStyle = `rgba(5,10,35,${nightFade * 0.46})`;
+    ctx.fillRect(0, 0, W, H);
+
+    // Névoa roxa nas bordas (atmosfera noturna)
+    const grad = ctx.createRadialGradient(W / 2, H / 2, H * 0.3, W / 2, H / 2, H * 0.85);
+    grad.addColorStop(0, "rgba(0,0,0,0)");
+    grad.addColorStop(1, `rgba(20,0,40,${nightFade * 0.18})`);
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+
+    // Estrelas — clipa na faixa do céu (top 28%) para não aparecerem sobre personagens
+    const skyH = H * 0.28;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, W, skyH);
+    ctx.clip();
+    for (let i = 0; i < 110; i++) {
+      const sx = ((i * 137 + 19) % 97) / 97;
+      const sy = ((i * 251 + 43) % 89) / 89;
+      const twinkle = 0.3 + Math.sin(this.time * (0.8 + (i % 7) * 0.25) + i) * 0.4;
+      const sz = 0.5 + (i % 4) * 0.45;
+      const hue = i % 3 === 0 ? "220,230,255" : i % 3 === 1 ? "255,255,220" : "255,240,200";
+      ctx.fillStyle = `rgba(${hue},${nightFade * twinkle})`;
+      ctx.beginPath();
+      ctx.arc(sx * W, sy * skyH, sz, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+
+    // Lua crescente (canto superior direito)
+    const moonX = W * 0.84,
+      moonY = H * 0.09;
+    const moonR = 20;
+    ctx.save();
+    ctx.globalAlpha = nightFade;
+    // Brilho suave ao redor da lua
+    const moonGlow = ctx.createRadialGradient(moonX, moonY, moonR, moonX, moonY, moonR * 3.5);
+    moonGlow.addColorStop(0, "rgba(240,230,180,0.18)");
+    moonGlow.addColorStop(1, "rgba(240,230,180,0)");
+    ctx.fillStyle = moonGlow;
+    ctx.beginPath();
+    ctx.arc(moonX, moonY, moonR * 3.5, 0, Math.PI * 2);
+    ctx.fill();
+    // Corpo da lua
+    ctx.fillStyle = "#f0e8c0";
+    ctx.beginPath();
+    ctx.arc(moonX, moonY, moonR, 0, Math.PI * 2);
+    ctx.fill();
+    // Sombra crescente
+    ctx.fillStyle = "rgba(5,10,35,0.90)";
+    ctx.beginPath();
+    ctx.arc(moonX + 9, moonY - 3, moonR - 1, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
   private renderUI() {
     const { canvas } = this;
     const W = canvas.width,
@@ -2914,7 +3092,8 @@ export class Game {
         (it) => (this.inventory.get(it.id) ?? 0) > 0,
       );
       const PW = 210;
-      const PH = 120 + (ownedItems.length > 0 ? 34 : 0);
+      // Base: cabeçalho(30) + 3 stats(60) + período(20) + moedas(20) + padding(16) = 146
+      const PH = 146 + (ownedItems.length > 0 ? 34 : 0);
       this.drawPanel(6, 6, PW, PH, 0);
 
       // Cabeçalho: cor + nome do jogador
@@ -2943,7 +3122,6 @@ export class Game {
           "🌾  Vagando:",
           `${this.cows.filter((c) => c.state === "wandering" || c.state === "fleeing").length}`,
         ],
-        ["📖  Descob.:", `${this.discovered.size} / ${COW_TYPES.length}`],
       ];
 
       let ry = 48;
@@ -2956,6 +3134,30 @@ export class Game {
         ctx.fillStyle = "#FFE0A0";
         ctx.textAlign = "right";
         ctx.fillText(value, PW - 10, ry);
+        ry += 20;
+      }
+
+      // Indicador período do dia
+      {
+        const period = this.timePeriod;
+        const periodLabel =
+          period === "noite"
+            ? this.nightFade < 0.8
+              ? "🌅 Anoitecendo..."
+              : "🌙 Noite"
+            : period === "manha"
+              ? "🌄 Manhã"
+              : "☀️ Tarde";
+        const periodColor =
+          period === "noite"
+            ? `rgba(160,190,255,${0.5 + this.nightFade * 0.5})`
+            : period === "manha"
+              ? "rgba(255,210,120,0.9)"
+              : "rgba(255,180,60,0.9)";
+        ctx.font = "bold 11px sans-serif";
+        ctx.textAlign = "left";
+        ctx.fillStyle = periodColor;
+        ctx.fillText(periodLabel, 14, ry);
         ry += 20;
       }
 
