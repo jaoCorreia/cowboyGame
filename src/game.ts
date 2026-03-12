@@ -77,7 +77,13 @@ interface Player {
   moving: boolean;
 }
 
-type CowState = "wandering" | "fleeing" | "lassoed" | "captured" | "based" | "stolen";
+type CowState =
+  | "wandering"
+  | "fleeing"
+  | "lassoed"
+  | "captured"
+  | "based"
+  | "stolen";
 
 interface Cow {
   id: number;
@@ -139,7 +145,6 @@ interface Bandit {
   state: "approaching" | "fleeing" | "scared";
   targetCow: Cow | null;
 }
-
 
 function dist(
   a: { col: number; row: number },
@@ -222,7 +227,9 @@ export class Game {
   private banditAnimFrame = 0;
   private banditAnimTimer = 0;
   // 'manha' incluído para teste — remover após validação
-  private readonly BANDIT_ACTIVE_PERIODS: ReadonlyArray<"manha" | "tarde" | "noite"> = ["noite"];
+  private readonly BANDIT_ACTIVE_PERIODS: ReadonlyArray<
+    "manha" | "tarde" | "noite"
+  > = ["noite"];
   private bookPage = 0; // page index currently displayed
   private bookPageTarget = 0; // page we are flipping towards
   private bookPageAnimT = 1; // 0 = flip in progress, 1 = settled
@@ -236,6 +243,22 @@ export class Game {
   private inventory = new Map<string, number>(); // itemId → level
   private itemIcons = new Map<string, HTMLImageElement>(); // cache de imagens de itens
   private shopOpen = false;
+  private vendorDialog: {
+    active: boolean;
+    text: string;
+    displayed: number;
+    timer: number;
+    done: boolean;
+  } = { active: false, text: "", displayed: 0, timer: 0, done: false };
+  private vendorMet = false;
+  private musicEnabled = true;
+  private dayTrackIndex = 0; // 0=main, 1=second — alternates each loop
+  private musicAudio: {
+    main: HTMLAudioElement;
+    second: HTMLAudioElement;
+    night: HTMLAudioElement;
+  } | null = null;
+  private musicCurrent: "main" | "second" | "night" | null = null;
   private shopTab: "sell" | "buy" = "sell";
   private shopSellButtons: Array<{
     cow: Cow;
@@ -427,6 +450,7 @@ export class Game {
     this.resize();
     window.addEventListener("resize", () => this.resize());
     this.preloadPlayerSprites();
+    this.initMusic();
 
     if (!this.isPreview) {
       // Rede multiplayer
@@ -612,6 +636,10 @@ export class Game {
         sprites.get(`player/run/${dir}/frame_00${f}.png`);
       }
     }
+    // Tree sprites
+    sprites.get("decorations/Curved_tree1.png");
+    sprites.get("decorations/White_tree1.png");
+    sprites.get("decorations/Blue-green_balls_tree3.png");
     // Bandit sprite sheets
     sprites.get("npcs/bandit/Unarmed_Walk_without_shadow.png");
     sprites.get("npcs/bandit/Unarmed_Run_without_shadow.png");
@@ -624,7 +652,11 @@ export class Game {
       this.keys.add(e.key.toLowerCase());
       if (e.key === " " || e.key.toLowerCase() === "e") this.handleAction();
       if (e.key.toLowerCase() === "b") this.toggleBook();
-      if (e.key === "F5") { e.preventDefault(); this.debugSpawnBandit(); }
+      if (e.key.toLowerCase() === "m") this.toggleMusic();
+      if (e.key === "F5") {
+        e.preventDefault();
+        this.debugSpawnBandit();
+      }
       if (e.key.toLowerCase() === "q") this.toggleStakeAim();
       if (this.bookOpen) {
         if (e.key === "ArrowRight" || e.key === "ArrowDown") {
@@ -988,6 +1020,12 @@ export class Game {
     }
 
     // Book button (top-right HUD area)
+    const musicBtnX = W - 120,
+      musicBtnY = 50;
+    if (Math.hypot(x - musicBtnX, y - musicBtnY) < 26) {
+      this.toggleMusic();
+      return;
+    }
     const bookBtnX = W - 50,
       bookBtnY = 50;
     if (Math.hypot(x - bookBtnX, y - bookBtnY) < 26) {
@@ -1067,6 +1105,19 @@ export class Game {
   }
 
   private handleAction() {
+    // Advance/dismiss vendor dialog
+    if (this.vendorDialog.active) {
+      if (!this.vendorDialog.done) {
+        // Skip to end on click
+        this.vendorDialog.displayed = this.vendorDialog.text.length;
+        this.vendorDialog.done = true;
+      } else {
+        // Dismiss and open shop
+        this.vendorDialog.active = false;
+        this.shopOpen = true;
+      }
+      return;
+    }
     if (this.shopOpen) {
       this.shopOpen = false;
       return;
@@ -1083,11 +1134,27 @@ export class Game {
       (b) => b.state === "fleeing" && dist(this.player, b) <= 3.5,
     );
     if (nearBandit) {
-      if (nearBandit.targetCow) { nearBandit.targetCow.state = "wandering"; nearBandit.targetCow = null; }
+      if (nearBandit.targetCow) {
+        nearBandit.targetCow.state = "wandering";
+        nearBandit.targetCow = null;
+      }
       nearBandit.state = "scared";
       return;
     }
     if (this.isAtVendor()) {
+      if (!this.vendorMet) {
+        // First meeting — show intro dialog
+        this.vendorDialog = {
+          active: true,
+          text: "Ei, parceiro! Nome meu não importa — pode me chamar de Vendedor.\nTrago o que o sertão esqueceu de te dar.\nTem dinheiro? Tem negócio.",
+          displayed: 0,
+          timer: 0,
+          done: false,
+        };
+        this.vendorMet = true;
+        this.discoveredNPCs.add("vendedor");
+        return;
+      }
       this.shopOpen = true;
       this.discoveredNPCs.add("vendedor");
       return;
@@ -1210,6 +1277,21 @@ export class Game {
     // Bandits
     this.updateBandits(dt);
 
+    // Vendor dialog typewriter
+    if (this.vendorDialog.active && !this.vendorDialog.done) {
+      this.vendorDialog.timer += dt;
+      if (this.vendorDialog.timer >= 0.03) {
+        this.vendorDialog.timer = 0;
+        this.vendorDialog.displayed = Math.min(
+          this.vendorDialog.text.length,
+          this.vendorDialog.displayed + 1,
+        );
+        if (this.vendorDialog.displayed >= this.vendorDialog.text.length) {
+          this.vendorDialog.done = true;
+        }
+      }
+    }
+
     // Trade result timer
     if (this.tradeState === "result" && this.tradeResultTimer > 0) {
       this.tradeResultTimer -= dt;
@@ -1246,6 +1328,7 @@ export class Game {
         this.cows.push(spawnCow(this.nextCowId++, this.map, true));
       }
     }
+    if (nowNight !== this.prevIsNight) this.onPeriodChange();
     this.prevIsNight = nowNight;
 
     // Respawn de vacas a cada 45-75s, sem ultrapassar COW_COUNT ativas
@@ -2188,26 +2271,31 @@ export class Game {
     const hash = col * 3 + row * 7;
 
     if (deco === "tree") {
-      // Pick one of 4 large tree/bush variants (row 0, cols 0-3)
-      const variant = hash % 4;
-      if (this.drawPlantSprite(x, y, variant, 0, 1.1)) return;
-      // canvas fallback
+      // Pick tree sprite by tile hash: 0=Curved, 1=White, 2=BlueBalls
+      const treeKeys = [
+        "decorations/Curved_tree1.png",
+        "decorations/White_tree1.png",
+        "decorations/Blue-green_balls_tree3.png",
+      ];
+      const key = treeKeys[hash % 3]!;
+      const img = sprites.get(key);
+      if (img) {
+        if (key.includes("Blue-green")) {
+          // 32x32 sprite — scale up to fit isometric tile nicely
+          ctx.drawImage(img, 0, 0, 32, 32, x - 32, y - 62, 64, 64);
+        } else {
+          // 128x128 sprite — anchor base at tile center
+          ctx.drawImage(img, 0, 0, 128, 128, x - 64, y - 118, 128, 128);
+        }
+        return;
+      }
+      // canvas fallback while loading
       ctx.fillStyle = "#5a3010";
       ctx.fillRect(x - 3, y - 16, 6, 14);
-      for (let i = 2; i >= 0; i--) {
-        ctx.fillStyle = i === 0 ? "#2d7a20" : i === 1 ? "#388e3c" : "#43a047";
-        ctx.beginPath();
-        ctx.ellipse(
-          x + (i - 1) * 3,
-          y - 20 - i * 4,
-          14 - i,
-          10 - i,
-          0,
-          0,
-          Math.PI * 2,
-        );
-        ctx.fill();
-      }
+      ctx.fillStyle = "#2d7a20";
+      ctx.beginPath();
+      ctx.ellipse(x, y - 22, 14, 10, 0, 0, Math.PI * 2);
+      ctx.fill();
     } else if (deco === "bush") {
       // Pick one of 4 medium bush variants (row 1, cols 0-3)
       const variant = hash % 4;
@@ -3087,11 +3175,13 @@ export class Game {
     this.renderStatsPanel();
     this.renderOnlinePanel(W, H);
     this.renderBookButton(W);
+    this.renderMusicButton(W);
     this.renderInventoryButton(W, H);
     this.renderChat(W, H);
     if (this.inventoryOpen) this.renderInventory(W, H);
 
-    // ── Bandit tug-of-war ─────────────────────────────────────────────────────
+    // ── Vendor dialog ────────────────────────────────────────────────────────
+    if (this.vendorDialog.active) this.renderVendorDialog();
 
     // ── Lasso minigame or fail overlay ───────────────────────────────────────
     if (this.lasso.active && this.lasso.phase === "pulling")
@@ -3109,13 +3199,17 @@ export class Game {
 
     // Dicas de teclado (desktop)
     if (W > 720) {
-      this.drawPanel(W - 180, 90, 170, 76, 3);
+      this.drawPanel(W - 220, 90, 210, 80, 3);
       this.ctx.fillStyle = "#C8A870";
       this.ctx.font = "11px sans-serif";
       this.ctx.textAlign = "center";
-      this.ctx.fillText("WASD / Setas = mover", W - 95, 118);
-      this.ctx.fillText("E / Espaço = ação   B = Livro", W - 95, 136);
-      this.ctx.fillText("Q = Estaca (cruzar rio)", W - 95, 154);
+      this.ctx.fillText("WASD / Setas = mover", W - 115, 115);
+      this.ctx.fillText(
+        "E / Espaço = ação   B = Livro   M = Música",
+        W - 115,
+        132,
+      );
+      this.ctx.fillText("Q = Estaca (cruzar rio)", W - 115, 149);
     }
   }
 
@@ -3462,6 +3556,103 @@ export class Game {
   }
 
   // ── Botão do livro (top-right) ────────────────────────────────────────────
+
+  private initMusic() {
+    if (typeof window === "undefined") return;
+    const make = (file: string) => {
+      const a = new Audio("/sounds/soundtrack/" + file);
+      a.loop = false;
+      a.volume = 0.55;
+      return a;
+    };
+    this.musicAudio = {
+      main: make("main.wav"),
+      second: make("second.wav"),
+      night: make("night.wav"),
+    };
+    this.musicAudio.main.addEventListener("ended",   () => this.onTrackEnded());
+    this.musicAudio.second.addEventListener("ended", () => this.onTrackEnded());
+    this.musicAudio.night.addEventListener("ended",  () => this.onTrackEnded());
+    // Browser blocks autoplay until first user gesture — start on first interaction
+    const startOnce = () => {
+      if (!this.musicEnabled) return;
+      this.playTrack(this.isNight ? "night" : "main");
+      window.removeEventListener("pointerdown", startOnce);
+      window.removeEventListener("keydown", startOnce);
+    };
+    window.addEventListener("pointerdown", startOnce);
+    window.addEventListener("keydown", startOnce);
+  }
+
+  private playTrack(name: "main" | "second" | "night") {
+    if (!this.musicAudio || !this.musicEnabled) return;
+    // Stop all
+    for (const t of ["main", "second", "night"] as const) {
+      this.musicAudio[t].pause();
+      this.musicAudio[t].currentTime = 0;
+    }
+    this.musicCurrent = name;
+    this.musicAudio[name].play().catch(() => {
+      /* autoplay blocked */
+    });
+  }
+
+  private onTrackEnded() {
+    if (!this.musicEnabled) return;
+    if (this.isNight) {
+      // Night loops itself
+      this.playTrack("night");
+    } else {
+      // Alternate main ↔ second
+      this.dayTrackIndex = 1 - this.dayTrackIndex;
+      this.playTrack(this.dayTrackIndex === 0 ? "main" : "second");
+    }
+  }
+
+  private onPeriodChange() {
+    if (!this.musicEnabled || !this.musicAudio) return;
+    if (this.isNight) {
+      this.playTrack("night");
+    } else {
+      // Resume day cycle from whichever track is next
+      this.playTrack(this.dayTrackIndex === 0 ? "main" : "second");
+    }
+  }
+
+  private toggleMusic() {
+    this.musicEnabled = !this.musicEnabled;
+    if (!this.musicAudio) return;
+    if (!this.musicEnabled) {
+      for (const t of ["main", "second", "night"] as const)
+        this.musicAudio[t].pause();
+    } else {
+      this.playTrack(
+        this.isNight ? "night" : this.dayTrackIndex === 0 ? "main" : "second",
+      );
+    }
+  }
+
+  private renderMusicButton(W: number) {
+    const { ctx } = this;
+    const cx = W - 120,
+      cy = 50;
+    this.drawPixelBtn(
+      cx - 24,
+      cy - 24,
+      48,
+      48,
+      this.musicEnabled ? "normal" : "pressed",
+    );
+    ctx.font = "20px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(this.musicEnabled ? "🎵" : "🔇", cx, cy);
+    ctx.textBaseline = "alphabetic";
+    ctx.fillStyle = this.musicEnabled ? "#FFD700" : "#888";
+    ctx.font = "bold 8px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("MÚSICA", cx, cy + 20);
+  }
 
   private renderBookButton(W: number) {
     const { ctx } = this;
@@ -3879,21 +4070,37 @@ export class Game {
   // ─── Bandido ──────────────────────────────────────────────────────────────
 
   private debugSpawnBandit() {
-    const target = this.cows.find(c => c.state === "based") ?? this.cows.find(c => c.state === "wandering");
-    if (!target) { console.warn("[bandit] sem vaca alvo"); return; }
+    const target =
+      this.cows.find((c) => c.state === "based") ??
+      this.cows.find((c) => c.state === "wandering");
+    if (!target) {
+      console.warn("[bandit] sem vaca alvo");
+      return;
+    }
     // Spawn close to target cow, just slightly away
     const spawnCol = target.col + 8;
     const spawnRow = target.row + 8;
     const fleeCol = MAP_COLS - 2;
     const fleeRow = MAP_ROWS - 2;
-    this.bandits.push({ id: this.nextBanditId++, col: spawnCol, row: spawnRow, fleeCol, fleeRow, state: "approaching", targetCow: target });
+    this.bandits.push({
+      id: this.nextBanditId++,
+      col: spawnCol,
+      row: spawnRow,
+      fleeCol,
+      fleeRow,
+      state: "approaching",
+      targetCow: target,
+    });
   }
 
   private spawnBandit() {
-    const based = this.cows.filter(c => c.state === "based");
-    const wandering = based.length > 0
-      ? based
-      : this.cows.filter(c => c.state === "wandering" || c.state === "fleeing");
+    const based = this.cows.filter((c) => c.state === "based");
+    const wandering =
+      based.length > 0
+        ? based
+        : this.cows.filter(
+            (c) => c.state === "wandering" || c.state === "fleeing",
+          );
     if (wandering.length === 0) return;
     const target = wandering[Math.floor(Math.random() * wandering.length)]!;
 
@@ -3923,7 +4130,6 @@ export class Game {
     });
   }
 
-
   private updateBandits(dt: number) {
     const period = this.timePeriod;
 
@@ -3937,7 +4143,10 @@ export class Game {
     // If player is very close to a fleeing bandit, auto-scare (proximity mechanic)
     for (const b of this.bandits) {
       if (b.state === "fleeing" && dist(this.player, b) <= 2.5) {
-        if (b.targetCow) { b.targetCow.state = "wandering"; b.targetCow = null; }
+        if (b.targetCow) {
+          b.targetCow.state = "wandering";
+          b.targetCow = null;
+        }
         b.state = "scared";
       }
     }
@@ -3949,7 +4158,12 @@ export class Game {
       if (b.state === "approaching") {
         const target = b.targetCow;
         // If target became invalid, flee empty
-        if (!target || (target.state !== "wandering" && target.state !== "fleeing" && target.state !== "based")) {
+        if (
+          !target ||
+          (target.state !== "wandering" &&
+            target.state !== "fleeing" &&
+            target.state !== "based")
+        ) {
           b.state = "scared";
           b.targetCow = null;
         } else {
@@ -4002,7 +4216,10 @@ export class Game {
     }
 
     // Spawn timer — only in active periods and when no bandit already on map
-    if (this.BANDIT_ACTIVE_PERIODS.includes(period) && this.bandits.length === 0) {
+    if (
+      this.BANDIT_ACTIVE_PERIODS.includes(period) &&
+      this.bandits.length === 0
+    ) {
       this.banditSpawnTimer -= dt;
       if (this.banditSpawnTimer <= 0) {
         this.spawnBandit();
@@ -4018,7 +4235,9 @@ export class Game {
     }
 
     // Hint when close
-    const near = this.bandits.find(b => b.state === "fleeing" && dist(this.player, b) <= 4.5);
+    const near = this.bandits.find(
+      (b) => b.state === "fleeing" && dist(this.player, b) <= 4.5,
+    );
     if (near) {
       const { ctx } = this;
       const { x, y } = this.isoToScreen(near.col, near.row);
@@ -4033,7 +4252,8 @@ export class Game {
     const { ctx } = this;
     const { x, y } = this.isoToScreen(b.col, b.row);
 
-    const FRAME_W = 64, FRAME_H = 64;
+    const FRAME_W = 64,
+      FRAME_H = 64;
 
     // Cow dragged BEHIND bandit (like herd cow) — draw before bandit so bandit renders on top
     if (b.targetCow && (b.state === "fleeing" || b.state === "scared")) {
@@ -4106,7 +4326,17 @@ export class Game {
       ctx.scale(-1, 1);
     }
     if (img) {
-      ctx.drawImage(img, srcX, srcY, FRAME_W, FRAME_H, x - FRAME_W / 2, y - FRAME_H + 10, FRAME_W, FRAME_H);
+      ctx.drawImage(
+        img,
+        srcX,
+        srcY,
+        FRAME_W,
+        FRAME_H,
+        x - FRAME_W / 2,
+        y - FRAME_H + 10,
+        FRAME_W,
+        FRAME_H,
+      );
     } else {
       // Canvas fallback while sprite loads
       ctx.fillStyle = "#d4946a";
@@ -4126,16 +4356,95 @@ export class Game {
     ctx.font = "bold 9px sans-serif";
     ctx.textAlign = "center";
     ctx.fillStyle =
-      b.state === "scared" ? "#aaffaa" :
-      b.state === "fleeing" ? "#ff6060" : "#ffcc44";
+      b.state === "scared"
+        ? "#aaffaa"
+        : b.state === "fleeing"
+          ? "#ff6060"
+          : "#ffcc44";
     const label =
-      b.state === "scared" ? "😱 fugindo!" :
-      b.state === "fleeing" ? "🏃 com a vaca!" : "🤫 se aproximando";
+      b.state === "scared"
+        ? "😱 fugindo!"
+        : b.state === "fleeing"
+          ? "🏃 com a vaca!"
+          : "🤫 se aproximando";
     ctx.fillText(label, x, y - FRAME_H + 4);
   }
 
+  private renderVendorDialog() {
+    const { ctx, canvas } = this;
+    const W = canvas.width,
+      H = canvas.height;
+    const d = this.vendorDialog;
+    const bw = Math.min(W - 32, 420),
+      bh = 130;
+    const bx = W / 2 - bw / 2,
+      by = H - bh - 24;
 
-    private renderMinigame() {
+    // Retro box: dark border + scanline-ish fill
+    ctx.fillStyle = "#0a0a10";
+    ctx.fillRect(bx, by, bw, bh);
+    ctx.strokeStyle = "#FFD700";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(bx, by, bw, bh);
+    ctx.strokeStyle = "rgba(255,215,0,0.25)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(bx + 3, by + 3, bw - 6, bh - 6);
+
+    // Speaker label
+    ctx.fillStyle = "#FFD700";
+    ctx.font = "bold 11px monospace";
+    ctx.textAlign = "left";
+    ctx.fillText("▶ VENDEDOR", bx + 14, by + 18);
+
+    // Typewriter text — wrap at bw-28px
+    const visText = d.text.slice(0, d.displayed);
+    ctx.fillStyle = "#e8e8d0";
+    ctx.font = "13px monospace";
+    const maxW = bw - 28;
+    const lines: string[] = [];
+    let current = "";
+    for (const ch of visText) {
+      if (ch === "\n") {
+        lines.push(current);
+        current = "";
+        continue;
+      }
+      const test = current + ch;
+      if (ctx.measureText(test).width > maxW) {
+        lines.push(current);
+        current = ch;
+      } else current = test;
+    }
+    lines.push(current);
+    lines.forEach((ln, i) => ctx.fillText(ln, bx + 14, by + 38 + i * 18));
+
+    // Blinking cursor while typing; "▶ continuar" when done
+    if (d.done) {
+      const blink = Math.floor(this.time * 2) % 2 === 0;
+      if (blink) {
+        ctx.fillStyle = "#FFD700";
+        ctx.font = "bold 11px monospace";
+        ctx.textAlign = "right";
+        ctx.fillText(
+          "[ E / clique para continuar ]",
+          bx + bw - 14,
+          by + bh - 12,
+        );
+      }
+    } else {
+      if (Math.floor(this.time * 4) % 2 === 0) {
+        ctx.fillStyle = "#e8e8d0";
+        ctx.fillText(
+          "█",
+          bx + 14 + ctx.measureText(lines[lines.length - 1]!).width,
+          by + 38 + (lines.length - 1) * 18,
+        );
+      }
+    }
+    ctx.textAlign = "left";
+  }
+
+  private renderMinigame() {
     const { ctx, canvas, lasso } = this;
     const W = canvas.width,
       H = canvas.height;

@@ -241,5 +241,6 @@ export function generateMap(): Tile[][] {
 export function isObstacle(tile: Tile): boolean {
   if (tile.type === "water") return true;
   if (tile.decoration === "boulder") return true;
+  if (tile.decoration === "tree") return true;
   return false;
 }
