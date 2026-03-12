@@ -32,6 +32,23 @@ export const SHOP_ITEMS: GameItem[] = [
     basePrice: 100,
     maxLevel: 3,
   },
+  {
+    id: "corda_aco",
+    name: "Corda de Aço",
+    description: "Captura até 5 vacas ao mesmo tempo",
+    icon: "⛓️",
+    basePrice: 350,
+    maxLevel: 1,
+  },
+  {
+    id: "bola_vermelha",
+    name: "Bola Vermelha Misteriosa",
+    description:
+      "Essa bola lembra uma doença sombria que mudou o mundo. O que será que ela desbloqueia?",
+    icon: "/sprites/hud/icons/red_ball_key.png",
+    basePrice: 10000,
+    maxLevel: 1,
+  },
 ];
 
 /** Price to upgrade from currentLevel → currentLevel+1 */

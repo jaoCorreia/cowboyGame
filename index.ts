@@ -37,7 +37,7 @@ interface UserDoc {
   basedCount: number;
   discoveredTypes: string[];
   capturedByType: Record<string, number>;
-  basedCows: string[]; 
+  basedCows: string[];
   coins: number;
   inventory: Record<string, number>;
 }
@@ -331,6 +331,27 @@ server = Bun.serve<WsData>({
     async open(ws) {
       const { id, username, color, userId } = ws.data;
 
+      // Desconecta sessão anterior se existir (evita login duplicado)
+      const oldWs = activeWsByUserId.get(userId);
+      if (oldWs && oldWs !== ws) {
+        const oldId = oldWs.data?.id;
+        try {
+          oldWs.send(JSON.stringify({ type: "kicked" }));
+        } catch {
+          /* ignorar */
+        }
+        try {
+          oldWs.close();
+        } catch {
+          /* ignorar */
+        }
+        // Remove jogador antigo da lista
+        if (oldId) {
+          players.delete(oldId);
+          server.publish("game", JSON.stringify({ type: "leave", id: oldId }));
+        }
+      }
+
       // Registra este WS como a conexão ativa do usuário
       activeWsByUserId.set(userId, ws);
 
@@ -481,8 +502,13 @@ server = Bun.serve<WsData>({
             ws.publish("game", chatMsg);
             ws.send(chatMsg);
           }
-        } else if (u.type === "trade_offer" && typeof u.toId === "string" && typeof u.itemId === "string") {
-          const level = typeof u.level === "number" ? Math.max(1, Math.floor(u.level)) : 1;
+        } else if (
+          u.type === "trade_offer" &&
+          typeof u.toId === "string" &&
+          typeof u.itemId === "string"
+        ) {
+          const level =
+            typeof u.level === "number" ? Math.max(1, Math.floor(u.level)) : 1;
           server.publish(
             `player:${u.toId}`,
             JSON.stringify({

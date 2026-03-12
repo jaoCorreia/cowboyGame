@@ -42,6 +42,33 @@ import { Network, type RemotePlayer, type ChatMessage } from "./network";
 import { type UserData, saveGameState } from "./auth";
 import { type GameItem, SHOP_ITEMS, itemNextPrice } from "./items";
 
+interface NPCEntry {
+  id: string;
+  name: string;
+  role: string;
+  description: string;
+  spriteKey: string;
+}
+
+const NPC_ENTRIES: NPCEntry[] = [
+  {
+    id: "vendedor",
+    name: "Vendedor",
+    role: "Comerciante",
+    description:
+      "Dizem que cruzou três desertos a pé, carregando tudo nas costas e sem beber uma gota d'água. Nunca reclama do calor, nunca pede descanso — só fareja lucro no horizonte. Alguns dizem que é meio camelo, outros dizem que é todo camelo.",
+    spriteKey: "npcs/saler.png",
+  },
+  {
+    id: "ladrao_culto",
+    name: "???",
+    role: "???",
+    description:
+      "Uma figura sinistra avistada nas sombras do mapa. Dizem que lidera um culto misterioso e rouba gado em plena luz do dia. Ninguém sabe ao certo quem é — ou o que vestem (ou não vestem).",
+    spriteKey: "npcs/saler.png",
+  },
+];
+
 interface Player {
   col: number;
   row: number;
@@ -172,12 +199,15 @@ export class Game {
   private bookPage = 0; // page index currently displayed
   private bookPageTarget = 0; // page we are flipping towards
   private bookPageAnimT = 1; // 0 = flip in progress, 1 = settled
+  private bookTab: "vacas" | "itens" | "personagens" = "vacas";
+  private discoveredNPCs = new Set<string>();
   private chatHistoryScroll = 0; // msgs scrolled up from bottom (0 = at bottom)
   private statsMinimized = false;
   private discovered = new Set<string>();
   private capturedByType = new Map<string, number>();
   private coins = 0;
   private inventory = new Map<string, number>(); // itemId → level
+  private itemIcons = new Map<string, HTMLImageElement>(); // cache de imagens de itens
   private shopOpen = false;
   private shopTab: "sell" | "buy" = "sell";
   private shopSellButtons: Array<{
@@ -338,6 +368,7 @@ export class Game {
       eyeIcon: new Image(),
       spaceKey: new Image(),
       trunkIcon: new Image(),
+      moneyIcon: new Image(),
     };
 
     this.icons.bookIcon.src = "/sprites/hud/icons/book_icon.png";
@@ -348,6 +379,20 @@ export class Game {
     this.icons.base.src = "/sprites/hud/icons/key_icon.png";
     this.icons.cowboy.src = "/sprites/hud/icons/lasso_icon.png";
     this.icons.spaceKey.src = "/sprites/hud/icons/space_key_icon.png";
+    this.icons.moneyIcon.src = "/sprites/hud/icons/money_icon.png";
+
+    // Pre-load item icons that are image paths
+    for (const item of SHOP_ITEMS) {
+      if (item.icon.includes("/") || item.icon.endsWith(".png")) {
+        const img = new Image();
+        // Normaliza o path: remove "public/" do início se existir
+        let iconPath = item.icon.replace(/^public\//, "");
+        // Garante que começa com /
+        if (!iconPath.startsWith("/")) iconPath = "/" + iconPath;
+        img.src = iconPath;
+        this.itemIcons.set(item.id, img);
+      }
+    }
 
     this.statsMinimized = window.innerWidth < 500;
     if (!this.isPreview) this.setupChatInput();
@@ -735,20 +780,42 @@ export class Game {
         this.bookOpen = false;
         return;
       }
-      // Prev / Next nav buttons (bottom centre of parchment)
+      // Tab clicks
       const parchX = BX + 26,
         parchY = BY + 37;
+      const parchW = BW - 50;
+      const tabs: Array<"vacas" | "itens" | "personagens"> = [
+        "vacas",
+        "itens",
+        "personagens",
+      ];
+      const tabW = (parchW - 20) / 3;
+      const tabY = parchY + 38;
+      const tabH = 24;
+      for (let i = 0; i < tabs.length; i++) {
+        const tx = parchX + 10 + i * tabW;
+        if (x >= tx && x <= tx + tabW && y >= tabY && y <= tabY + tabH) {
+          this.bookTab = tabs[i]!;
+          this.bookPage = 0;
+          this.bookPageTarget = 0;
+          this.bookPageAnimT = 1;
+          return;
+        }
+      }
+      // Prev / Next nav buttons (bottom centre of parchment)
       const parchH = BH - 74;
       const navY = parchY + parchH - 28;
       const prevCX = BX + BW / 2 - 70;
       const nextCX = BX + BW / 2 + 70;
-      if (Math.hypot(x - prevCX, y - navY) < 28) {
-        this.bookFlipPage(-1);
-        return;
-      }
-      if (Math.hypot(x - nextCX, y - navY) < 28) {
-        this.bookFlipPage(1);
-        return;
+      if (this.bookTab === "vacas" || this.bookTab === "personagens") {
+        if (Math.hypot(x - prevCX, y - navY) < 28) {
+          this.bookFlipPage(-1);
+          return;
+        }
+        if (Math.hypot(x - nextCX, y - navY) < 28) {
+          this.bookFlipPage(1);
+          return;
+        }
       }
       // Click outside panel closes book
       if (x < BX || x > BX + BW || y < BY || y > BY + BH) {
@@ -878,7 +945,12 @@ export class Game {
     // Inventory button (top-right, below book button)
     const invBtnX = W - 80,
       invBtnY = H - 330;
-    if (x >= invBtnX - 30 && x <= invBtnX + 30 && y >= invBtnY - 30 && y <= invBtnY + 30) {
+    if (
+      x >= invBtnX - 30 &&
+      x <= invBtnX + 30 &&
+      y >= invBtnY - 30 &&
+      y <= invBtnY + 30
+    ) {
       this.inventoryOpen = !this.inventoryOpen;
       return;
     }
@@ -976,6 +1048,7 @@ export class Game {
     if (this.lasso.active) return;
     if (this.isAtVendor()) {
       this.shopOpen = true;
+      this.discoveredNPCs.add("vendedor");
       return;
     }
     if (this.isAtBase() && this.herdCows().length > 0) {
@@ -998,10 +1071,20 @@ export class Game {
       this.bookPage = 0;
       this.bookPageTarget = 0;
       this.bookPageAnimT = 1;
+      this.bookTab = "vacas";
     }
   }
 
   private bookFlipPage(dir: 1 | -1) {
+    if (this.bookTab === "personagens") {
+      const next = Math.max(
+        0,
+        Math.min(NPC_ENTRIES.length - 1, this.bookPage + dir),
+      );
+      if (next === this.bookPage) return;
+      this.bookPage = next;
+      return;
+    }
     if (this.bookPageAnimT < 1) return; // already animating
     const next = Math.max(
       0,
@@ -1052,8 +1135,11 @@ export class Game {
   // ─── Logic ────────────────────────────────────────────────────────────────
 
   private loop(t: number) {
-    const dt = Math.min((t - this.lastTime) / 1000, 0.1);
-    this.lastTime = t;
+    requestAnimationFrame((t2) => this.loop(t2));
+    const elapsed = t - this.lastTime;
+    if (elapsed < 16.67) return; // cap at 60 fps
+    const dt = Math.min(elapsed / 1000, 0.1);
+    this.lastTime = t - (elapsed % 16.67); // carry over excess
     this.time += dt;
     // Advance book page-flip animation
     if (this.bookPageAnimT < 1) {
@@ -1066,7 +1152,6 @@ export class Game {
       this.update(dt);
     }
     this.render();
-    requestAnimationFrame((t2) => this.loop(t2));
   }
 
   private update(dt: number) {
@@ -1470,6 +1555,7 @@ export class Game {
   }
 
   private get effectiveHerdCapacity() {
+    if ((this.inventory.get("corda_aco") ?? 0) >= 1) return 5;
     return 1 + (this.inventory.get("lasso_extra") ?? 0);
   }
 
@@ -2828,7 +2914,7 @@ export class Game {
         (it) => (this.inventory.get(it.id) ?? 0) > 0,
       );
       const PW = 210;
-      const PH = 152 + (ownedItems.length > 0 ? 34 : 0);
+      const PH = 120 + (ownedItems.length > 0 ? 34 : 0);
       this.drawPanel(6, 6, PW, PH, 0);
 
       // Cabeçalho: cor + nome do jogador
@@ -2837,8 +2923,8 @@ export class Game {
       ctx.roundRect(12, 12, 12, 12, 2);
       ctx.fill();
       ctx.textAlign = "left";
-      ctx.font = "bold 13px sans-serif";
-      ctx.fillStyle = "#FFE0A0";
+      ctx.font = "16px Merriweather";
+      ctx.fillStyle = "#ffffff";
       ctx.fillText(this.myName, 30, 23);
 
       // Divisor
@@ -2858,55 +2944,34 @@ export class Game {
           `${this.cows.filter((c) => c.state === "wandering" || c.state === "fleeing").length}`,
         ],
         ["📖  Descob.:", `${this.discovered.size} / ${COW_TYPES.length}`],
-        ["💰  Moedas:", `${this.coins}`],
       ];
 
       let ry = 48;
       for (const [label, value] of rows) {
-        ctx.font = "12px sans-serif";
-        ctx.fillStyle = label.startsWith("💰") ? "#FFD700" : "#C8A870";
+        ctx.font = "16px Merriweather";
+        ctx.fillStyle = "#C8A870";
         ctx.textAlign = "left";
         ctx.fillText(label, 14, ry);
-        ctx.font = "bold 12px sans-serif";
-        ctx.fillStyle = label.startsWith("💰") ? "#FFD700" : "#FFE0A0";
+        ctx.font = "16px Merriweather";
+        ctx.fillStyle = "#FFE0A0";
         ctx.textAlign = "right";
         ctx.fillText(value, PW - 10, ry);
         ry += 20;
       }
 
-      // ── Inventário (só mostra itens com level > 0) ────────────────────────
-      if (ownedItems.length > 0) {
-        const invY = ry + 4;
-        ctx.strokeStyle = "rgba(200,160,80,0.35)";
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(12, invY - 2);
-        ctx.lineTo(PW - 12, invY - 2);
-        ctx.stroke();
-
-        ctx.font = "10px sans-serif";
-        ctx.fillStyle = "#C8A870";
-        ctx.textAlign = "left";
-        ctx.fillText("🎒 Itens:", 14, invY + 12);
-
-        let ix = 72;
-        for (const item of ownedItems) {
-          const level = this.inventory.get(item.id) ?? 0;
-          // Badge: emoji icon + "Lv N"
-          ctx.font = "16px sans-serif";
-          ctx.textAlign = "center";
-          ctx.fillText(item.icon, ix, invY + 16);
-          ctx.font = "bold 9px sans-serif";
-          ctx.fillStyle = "#FFD700";
-          ctx.fillText(`Lv${level}`, ix, invY + 27);
-          ix += 36;
-        }
-      }
+      // Moedas com ícone
+      ctx.drawImage(this.icons.moneyIcon, 14, ry - 14, 16, 16);
+      ctx.font = "16px Merriweather";
+      ctx.fillStyle = "#FFD700";
+      ctx.textAlign = "left";
+      ctx.fillText("Moedas:", 34, ry);
+      ctx.textAlign = "right";
+      ctx.fillText(`${this.coins}`, PW - 10, ry);
 
       // Botão recolher
       this.drawPixelBtn(PW - 20, 9, 22, 22, "normal");
       ctx.fillStyle = "#FFD700";
-      ctx.font = "bold 11px sans-serif";
+      ctx.font = "11px sans-serif";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillText("◀", PW - 9, 20);
@@ -2923,8 +2988,8 @@ export class Game {
     // Só aparece quando há alguém conectado
     if (this.remotePlayers.size === 0) return;
 
-    // Em mobile ocupa espaço demais — esconde se tela muito pequena
-    if (W < 480) return;
+    // // Em mobile ocupa espaço demais — esconde se tela muito pequena
+    // if (W < 480) return;
 
     // Lista: eu primeiro, depois remotos
     type Entry = { color: string; name: string; isMe: boolean };
@@ -2945,12 +3010,12 @@ export class Game {
 
     // Lado esquerdo, abaixo do painel de stats
     const PX = 6;
-    const PY = this.statsMinimized ? 50 : 144;
+    const PY = this.statsMinimized ? 60 : 160;
 
     this.drawPanel(PX, PY, PW, PH, 1);
 
     // Cabeçalho
-    ctx.font = "bold 11px sans-serif";
+    ctx.font = "11px sans-serif";
     ctx.textAlign = "left";
     ctx.fillStyle = "#55FF99";
     ctx.fillText(
@@ -3036,7 +3101,7 @@ export class Game {
       let ty = panelY + padV + 12;
       for (const msg of slice) {
         ctx.globalAlpha = 1;
-        ctx.font = "bold 11px sans-serif";
+        ctx.font = " 11px sans-serif";
         ctx.textAlign = "left";
         ctx.fillStyle = msg.color;
         const nameLabel = msg.name + ": ";
@@ -3059,7 +3124,7 @@ export class Game {
       if (this.chatHistoryScroll > 0) {
         ctx.save();
         ctx.globalAlpha = 0.8;
-        ctx.font = "bold 10px sans-serif";
+        ctx.font = "10px sans-serif";
         ctx.fillStyle = "#FFD700";
         ctx.textAlign = "left";
         ctx.fillText("▲ scroll (roda do mouse)", 14, panelY - 5);
@@ -3068,7 +3133,7 @@ export class Game {
 
       ctx.save();
       ctx.globalAlpha = 0.75;
-      ctx.font = "bold 10px sans-serif";
+      ctx.font = "10px sans-serif";
       ctx.fillStyle = "#FFD700";
       ctx.textAlign = "left";
       ctx.fillText("Enter = enviar  •  Esc = fechar", 14, H - 183);
@@ -3145,14 +3210,14 @@ export class Game {
 
   private renderInventoryButton(W: number, H: number) {
     const { ctx } = this;
-    const cx = W - 80, cy = H - 330;
+    const cx = W - 80,
+      cy = H - 330;
     const active = this.inventoryOpen;
     this.drawPixelBtn(cx - 30, cy - 30, 60, 60, active ? "active" : "normal");
     ctx.drawImage(this.icons.trunkIcon, cx - 16, cy - 16, 32, 32);
     ctx.textAlign = "center";
     ctx.fillStyle = active ? "#FFD700" : "#C8A870";
     ctx.font = "bold 9px sans-serif";
-    ctx.fillText("Mochila", cx, cy + 36);
   }
 
   private renderInventory(W: number, H: number) {
@@ -3245,10 +3310,33 @@ export class Game {
         ctx.fillStyle = "rgba(255,255,255,0.04)";
         ctx.fillRect(PX + 6, cy, PW - 12, ROW_H - 2);
       }
-      ctx.font = "28px sans-serif";
-      ctx.textAlign = "center";
-      ctx.fillStyle = "#FFE0A0";
-      ctx.fillText(item.icon, PX + 30, cy + 36);
+
+      // Icon background
+      const invIconX = PX + 30;
+      const invIconY = cy + 36;
+      ctx.fillStyle = "rgba(200,160,80,0.25)";
+      ctx.beginPath();
+      ctx.arc(invIconX, invIconY, 18, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "rgba(180,130,40,0.4)";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(invIconX, invIconY, 18, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // Icon (image or emoji)
+      const invItemImg = this.itemIcons.get(item.id);
+      if (invItemImg && invItemImg.complete && invItemImg.naturalWidth > 0) {
+        ctx.drawImage(invItemImg, invIconX - 12, invIconY - 12, 24, 24);
+      } else {
+        ctx.font = "22px sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillStyle = "#FFE0A0";
+        ctx.fillText(item.icon, invIconX, invIconY);
+        ctx.textBaseline = "alphabetic";
+      }
+
       ctx.textAlign = "left";
       ctx.font = "bold 12px sans-serif";
       ctx.fillStyle = "#FFE0A0";
@@ -3316,25 +3404,51 @@ export class Game {
     ctx.font = "bold 11px sans-serif";
     ctx.fillStyle = offer.fromColor;
     ctx.fillText(`De: ${offer.fromName}`, PX + PW / 2, PY + 46);
-    ctx.font = "32px sans-serif";
-    ctx.fillStyle = "#FFE0A0";
-    ctx.fillText(offer.item.icon, PX + PW / 2, PY + 84);
+
+    // Trade item icon with background
+    const tradeIconX = PX + PW / 2;
+    const tradeIconY = PY + 80;
+    ctx.fillStyle = "rgba(200,160,80,0.3)";
+    ctx.beginPath();
+    ctx.arc(tradeIconX, tradeIconY, 24, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(180,130,40,0.5)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(tradeIconX, tradeIconY, 24, 0, Math.PI * 2);
+    ctx.stroke();
+
+    const tradeItemImg = this.itemIcons.get(offer.item.id);
+    if (
+      tradeItemImg &&
+      tradeItemImg.complete &&
+      tradeItemImg.naturalWidth > 0
+    ) {
+      ctx.drawImage(tradeItemImg, tradeIconX - 16, tradeIconY - 16, 32, 32);
+    } else {
+      ctx.font = "28px sans-serif";
+      ctx.textBaseline = "middle";
+      ctx.fillStyle = "#FFE0A0";
+      ctx.fillText(offer.item.icon, tradeIconX, tradeIconY);
+      ctx.textBaseline = "alphabetic";
+    }
+
     ctx.font = "bold 12px sans-serif";
     ctx.fillStyle = "#FFD700";
     ctx.fillText(
       `${offer.item.name}  Lv ${offer.level}`,
       PX + PW / 2,
-      PY + 102,
+      PY + 112,
     );
     ctx.font = "10px sans-serif";
     ctx.fillStyle = "#C8A870";
-    ctx.fillText(offer.item.description, PX + PW / 2, PY + 116);
+    ctx.fillText(offer.item.description, PX + PW / 2, PY + 128);
     const bW = 110,
       bH = 32;
     const aX = PX + PW / 2 - bW - 8,
-      aY = PY + 132;
+      aY = PY + 146;
     const dX = PX + PW / 2 + 8,
-      dY = PY + 132;
+      dY = PY + 146;
     this.drawPixelBtn(aX, aY, bW, bH, "active");
     ctx.fillStyle = "#FFD700";
     ctx.font = "bold 12px sans-serif";
@@ -3613,9 +3727,13 @@ export class Game {
     let icon = this.icons.spaceKey;
     let label = "E";
 
+    const atVendor = this.isAtVendor();
     if (this.lasso.active && this.lasso.phase === "pulling") {
       btnState = this.lasso.flashTimer > 0 ? "pressed" : "active";
       icon = this.icons.pull;
+    } else if (atVendor && !this.shopOpen) {
+      btnState = "active";
+      icon = this.icons.moneyIcon;
     } else if (atBase && hasHerd) {
       btnState = "active";
       icon = this.icons.base;
@@ -3686,19 +3804,55 @@ export class Game {
     ctx.fillStyle = "#f2e8cc";
     ctx.fillRect(parchX, parchY, parchW, parchH);
 
-    // ── Fixed header ─────────────────────────────────────────────────────────
+    // Title
     ctx.fillStyle = "#5c2e08";
     ctx.font = "bold 20px serif";
     ctx.textAlign = "center";
     ctx.fillText("📖  Livro do Cowboy", BX + BW / 2, parchY + 26);
-    ctx.fillStyle = "#887050";
-    ctx.font = "13px serif";
-    ctx.fillText(
-      `Descobertas: ${this.discovered.size} / ${COW_TYPES.length}`,
-      BX + BW / 2,
-      parchY + 44,
-    );
-    const headerH = 56;
+
+    // Tab buttons
+    const ownedItemsCount = SHOP_ITEMS.filter(
+      (it) => (this.inventory.get(it.id) ?? 0) > 0,
+    ).length;
+    const discovNPCCount = NPC_ENTRIES.filter((n) =>
+      this.discoveredNPCs.has(n.id),
+    ).length;
+    const bookTabs: Array<{
+      key: "vacas" | "itens" | "personagens";
+      label: string;
+    }> = [
+      { key: "vacas", label: `🐄 ${this.discovered.size}/${COW_TYPES.length}` },
+      { key: "itens", label: `🎒 ${ownedItemsCount}/${SHOP_ITEMS.length}` },
+      {
+        key: "personagens",
+        label: `👤 ${discovNPCCount}/${NPC_ENTRIES.length}`,
+      },
+    ];
+    const tabW = (parchW - 20) / 3;
+    const tabY = parchY + 38;
+    const tabH = 24;
+    for (let i = 0; i < bookTabs.length; i++) {
+      const tab = bookTabs[i]!;
+      const tx = parchX + 10 + i * tabW;
+      const active = this.bookTab === tab.key;
+      ctx.fillStyle = active ? "#c8a060" : "#e0d0a8";
+      ctx.beginPath();
+      ctx.roundRect(tx, tabY, tabW - 4, tabH, [4, 4, 0, 0]);
+      ctx.fill();
+      ctx.strokeStyle = "#c8a060";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(tx, tabY, tabW - 4, tabH, [4, 4, 0, 0]);
+      ctx.stroke();
+      ctx.fillStyle = active ? "#3a1a00" : "#887050";
+      ctx.font = `bold ${active ? 12 : 11}px sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(tab.label, tx + (tabW - 4) / 2, tabY + 12);
+      ctx.textBaseline = "alphabetic";
+    }
+
+    const headerH = 74;
     ctx.strokeStyle = "#c8a060";
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -3717,42 +3871,76 @@ export class Game {
     ctx.fillText("✕", closeBtnX + 24, closeBtnY + 20);
     ctx.textBaseline = "alphabetic";
 
-    // ── Page-flip animation (horizontal squeeze around parchment centre) ─────
-    // t goes 0→1; scaleX: 1→0 in first half, 0→1 in second half
+    const pageTop = parchY + headerH + 2;
+    const pageH = parchH - headerH - 48;
+
+    if (this.bookTab === "vacas") {
+      this.renderBookVacas(
+        parchX,
+        parchY,
+        parchW,
+        parchH,
+        pageTop,
+        pageH,
+        BX,
+        BW,
+      );
+    } else if (this.bookTab === "itens") {
+      this.renderBookItens(parchX, parchY, parchW, parchH, pageTop, BX, BW);
+    } else {
+      this.renderBookPersonagens(
+        parchX,
+        parchY,
+        parchW,
+        parchH,
+        pageTop,
+        pageH,
+        BX,
+        BW,
+      );
+    }
+  }
+
+  private renderBookVacas(
+    parchX: number,
+    parchY: number,
+    parchW: number,
+    parchH: number,
+    pageTop: number,
+    pageH: number,
+    BX: number,
+    BW: number,
+  ) {
+    const { ctx } = this;
+    const pageCX = parchX + parchW / 2;
+
     const t = this.bookPageAnimT;
     const scaleX = t < 0.5 ? 1 - t * 2 : (t - 0.5) * 2;
-    const pageCX = parchX + parchW / 2;
-    const pageTop = parchY + headerH + 2;
-    const pageH = parchH - headerH - 48; // leave room for nav buttons
 
-    // Clip the parchment body so drawing stays inside
     ctx.save();
     ctx.beginPath();
     ctx.rect(parchX, pageTop, parchW, pageH + 40);
     ctx.clip();
 
-    // Apply horizontal squeeze centred on page
     ctx.save();
     ctx.translate(pageCX, pageTop + pageH / 2);
     ctx.scale(scaleX, 1);
     ctx.translate(-pageCX, -(pageTop + pageH / 2));
 
-    // ── Single cow page content ───────────────────────────────────────────────
-    const t2 = COW_TYPES[this.bookPage]!;
-    const discovered = this.discovered.has(t2.id);
-    const count = this.capturedByType.get(t2.id) ?? 0;
+    const cowType = COW_TYPES[this.bookPage]!;
+    const discovered = this.discovered.has(cowType.id);
+    const count = this.capturedByType.get(cowType.id) ?? 0;
 
-    // Cow illustration (large, centred)
     const cowCX = pageCX;
-    const cowCY = pageTop + 100;
+    const cowCY = pageTop + 90;
+
     if (discovered) {
       ctx.save();
       ctx.translate(cowCX, cowCY);
       ctx.scale(1.4, 1.4);
-      this.drawCowAt(0, 0, t2);
+      this.drawCowAt(0, 0, cowType);
       ctx.restore();
     } else {
-      // Silhouette with big ? mark
       ctx.fillStyle = "rgba(0,0,0,0.12)";
       ctx.beginPath();
       ctx.roundRect(cowCX - 44, cowCY - 44, 88, 80, 12);
@@ -3765,45 +3953,41 @@ export class Game {
       ctx.textBaseline = "alphabetic";
     }
 
-    // Name
     ctx.fillStyle = discovered ? "#3a1a00" : "#888";
     ctx.font = `bold ${discovered ? 22 : 18}px serif`;
     ctx.textAlign = "center";
-    ctx.fillText(discovered ? t2.name : "???", pageCX, cowCY + 68);
+    ctx.fillText(discovered ? cowType.name : "???", pageCX, cowCY + 64);
 
-    // Rarity badge
-    const rarityColor = RARITY_COLORS[t2.rarity] ?? "#aaa";
-    const rarityLabel = RARITY_LABELS[t2.rarity] ?? t2.rarity;
+    const rarityColor = RARITY_COLORS[cowType.rarity] ?? "#aaa";
+    const rarityLabel = RARITY_LABELS[cowType.rarity] ?? cowType.rarity;
     ctx.font = "12px sans-serif";
     const badgeW = ctx.measureText(rarityLabel).width + 16;
     const badgeX = pageCX - badgeW / 2;
     ctx.fillStyle = rarityColor + "33";
     ctx.beginPath();
-    ctx.roundRect(badgeX, cowCY + 74, badgeW, 20, 6);
+    ctx.roundRect(badgeX, cowCY + 70, badgeW, 20, 6);
     ctx.fill();
     ctx.fillStyle = rarityColor;
     ctx.font = "bold 12px sans-serif";
-    ctx.fillText(rarityLabel, pageCX, cowCY + 88);
+    ctx.fillText(rarityLabel, pageCX, cowCY + 84);
 
-    // Divider
     ctx.strokeStyle = "#c8a060";
     ctx.lineWidth = 0.8;
     ctx.globalAlpha = 0.5;
     ctx.beginPath();
-    ctx.moveTo(parchX + 30, cowCY + 102);
-    ctx.lineTo(parchX + parchW - 30, cowCY + 102);
+    ctx.moveTo(parchX + 30, cowCY + 98);
+    ctx.lineTo(parchX + parchW - 30, cowCY + 98);
     ctx.stroke();
     ctx.globalAlpha = 1;
 
-    // Description (word-wrapped)
     if (discovered) {
       ctx.fillStyle = "#5c3010";
       ctx.font = "13px serif";
       ctx.textAlign = "center";
       const maxDescW = parchW - 60;
-      const words = t2.description.split(" ");
+      const words = cowType.description.split(" ");
       let line = "";
-      let lineY = cowCY + 122;
+      let lineY = cowCY + 118;
       for (const word of words) {
         const test = line ? line + " " + word : word;
         if (ctx.measureText(test).width > maxDescW) {
@@ -3815,28 +3999,338 @@ export class Game {
         }
       }
       if (line) ctx.fillText(line, pageCX, lineY);
-      lineY += 24;
-
-      ctx.fillStyle = "#887050";
-      ctx.font = "12px sans-serif";
-      ctx.fillText(`Capturadas: ${count}`, pageCX, lineY);
+      lineY += 28;
+      // Capturadas badge
+      const capText =
+        count > 0
+          ? `🏆 ${count} capturada${count !== 1 ? "s" : ""}`
+          : "🎯 Ainda não capturada";
+      ctx.font = "bold 12px sans-serif";
+      const capBW = ctx.measureText(capText).width + 20;
+      const capBX = pageCX - capBW / 2;
+      ctx.fillStyle = count > 0 ? "rgba(180,130,0,0.18)" : "rgba(0,0,0,0.07)";
+      ctx.beginPath();
+      ctx.roundRect(capBX, lineY - 14, capBW, 22, 8);
+      ctx.fill();
+      ctx.strokeStyle = count > 0 ? "rgba(180,130,0,0.5)" : "rgba(0,0,0,0.15)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(capBX, lineY - 14, capBW, 22, 8);
+      ctx.stroke();
+      ctx.fillStyle = count > 0 ? "#8a6000" : "#999";
+      ctx.textBaseline = "middle";
+      ctx.fillText(capText, pageCX, lineY - 3);
+      ctx.textBaseline = "alphabetic";
     } else {
       ctx.fillStyle = "#aaa";
       ctx.font = "13px serif";
       ctx.textAlign = "center";
-      ctx.fillText("Não descoberta ainda.", pageCX, cowCY + 124);
+      ctx.fillText("Não descoberta ainda.", pageCX, cowCY + 120);
     }
 
-    ctx.restore(); // end squeeze transform
-    ctx.restore(); // end clip
+    ctx.restore();
+    ctx.restore();
 
-    // ── Nav buttons (prev / next) ─────────────────────────────────────────────
+    this.renderBookNav(
+      parchX,
+      parchY,
+      parchW,
+      parchH,
+      BX,
+      BW,
+      this.bookPage,
+      COW_TYPES.length,
+    );
+
+    ctx.fillStyle = "#887050";
+    ctx.font = "10px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(
+      "← → ou scroll para navegar",
+      BX + BW / 2,
+      parchY + parchH - 6,
+    );
+  }
+
+  private renderBookItens(
+    parchX: number,
+    parchY: number,
+    parchW: number,
+    parchH: number,
+    pageTop: number,
+    BX: number,
+    BW: number,
+  ) {
+    const { ctx } = this;
+    const pageCX = parchX + parchW / 2;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(parchX, pageTop, parchW, parchH - (pageTop - parchY));
+    ctx.clip();
+
+    const itemH = 74;
+    let iy = pageTop + 10;
+
+    for (const item of SHOP_ITEMS) {
+      const level = this.inventory.get(item.id) ?? 0;
+      const owned = level > 0;
+      const maxed = level >= item.maxLevel;
+
+      ctx.fillStyle = owned ? "rgba(180,130,40,0.12)" : "rgba(0,0,0,0.05)";
+      ctx.beginPath();
+      ctx.roundRect(parchX + 14, iy, parchW - 28, itemH - 6, 8);
+      ctx.fill();
+      if (owned) {
+        ctx.strokeStyle = "rgba(180,130,40,0.4)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.roundRect(parchX + 14, iy, parchW - 28, itemH - 6, 8);
+        ctx.stroke();
+      }
+
+      const iconX = parchX + 40;
+      const iconY = iy + (itemH - 6) / 2 - 2;
+      const iconRadius = 22;
+
+      // Fundo circular do ícone
+      ctx.fillStyle = owned ? "rgba(200,160,80,0.3)" : "rgba(100,100,100,0.15)";
+      ctx.beginPath();
+      ctx.arc(iconX, iconY, iconRadius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = owned
+        ? "rgba(180,130,40,0.5)"
+        : "rgba(100,100,100,0.2)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(iconX, iconY, iconRadius, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // Ícone (imagem ou emoji)
+      ctx.globalAlpha = owned ? 1 : 0.4;
+      const itemImg = this.itemIcons.get(item.id);
+      if (itemImg && itemImg.complete && itemImg.naturalWidth > 0) {
+        const imgSize = 28;
+        ctx.drawImage(
+          itemImg,
+          iconX - imgSize / 2,
+          iconY - imgSize / 2,
+          imgSize,
+          imgSize,
+        );
+      } else {
+        ctx.font = "26px sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillStyle = "#000";
+        ctx.fillText(item.icon, iconX, iconY);
+        ctx.textBaseline = "alphabetic";
+      }
+      ctx.globalAlpha = 1;
+
+      ctx.fillStyle = owned ? "#3a1a00" : "#999";
+      ctx.font = "bold 13px sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillText(owned ? item.name : "???", parchX + 70, iy + 22);
+
+      if (owned) {
+        ctx.fillStyle = "#5c3010";
+        ctx.font = "11px serif";
+        ctx.fillText(item.description, parchX + 70, iy + 38);
+      } else {
+        ctx.fillStyle = "#bbb";
+        ctx.font = "11px serif";
+        ctx.fillText("Item não descoberto", parchX + 70, iy + 38);
+      }
+
+      if (owned) {
+        const badgeText = maxed ? "MAX" : `Nív. ${level}/${item.maxLevel}`;
+        ctx.font = "bold 11px sans-serif";
+        const bw = ctx.measureText(badgeText).width + 12;
+        const bx = parchX + parchW - 28 - bw;
+        ctx.fillStyle = (maxed ? "#FFD700" : "#c8a060") + "44";
+        ctx.beginPath();
+        ctx.roundRect(bx, iy + 10, bw, 18, 5);
+        ctx.fill();
+        ctx.fillStyle = maxed ? "#b08000" : "#6a4020";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(badgeText, bx + bw / 2, iy + 19);
+        ctx.textBaseline = "alphabetic";
+      }
+
+      iy += itemH;
+    }
+
+    ctx.restore();
+
+    const ownedCount = SHOP_ITEMS.filter(
+      (it) => (this.inventory.get(it.id) ?? 0) > 0,
+    ).length;
+    ctx.fillStyle = "#887050";
+    ctx.font = "10px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(
+      `Itens descobertos: ${ownedCount} / ${SHOP_ITEMS.length}`,
+      BX + BW / 2,
+      parchY + parchH - 6,
+    );
+  }
+
+  private renderBookPersonagens(
+    parchX: number,
+    parchY: number,
+    parchW: number,
+    parchH: number,
+    pageTop: number,
+    pageH: number,
+    BX: number,
+    BW: number,
+  ) {
+    const { ctx } = this;
+    const pageCX = parchX + parchW / 2;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(parchX, pageTop, parchW, pageH + 40);
+    ctx.clip();
+
+    const npc = NPC_ENTRIES[this.bookPage];
+    if (!npc) {
+      ctx.restore();
+      return;
+    }
+    const discovered = this.discoveredNPCs.has(npc.id);
+
+    const npcCX = pageCX;
+    const npcCY = pageTop + 90;
+
+    if (discovered) {
+      const img = sprites.get(npc.spriteKey);
+      const SW = 64,
+        SH = 64;
+      if (img) {
+        ctx.save();
+        ctx.translate(npcCX, npcCY - 14);
+        ctx.scale(1.4, 1.4);
+        ctx.drawImage(img, -SW / 2, -SH / 2, SW, SH);
+        ctx.restore();
+      } else {
+        ctx.font = "52px sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillStyle = "#887050";
+        ctx.fillText("🧑‍🌾", npcCX, npcCY - 10);
+        ctx.textBaseline = "alphabetic";
+      }
+    } else {
+      ctx.fillStyle = "rgba(0,0,0,0.12)";
+      ctx.beginPath();
+      ctx.roundRect(npcCX - 44, npcCY - 54, 88, 80, 12);
+      ctx.fill();
+      ctx.fillStyle = "#bbb";
+      ctx.font = "bold 52px serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("?", npcCX, npcCY - 14);
+      ctx.textBaseline = "alphabetic";
+    }
+
+    ctx.fillStyle = discovered ? "#3a1a00" : "#888";
+    ctx.font = `bold ${discovered ? 22 : 18}px serif`;
+    ctx.textAlign = "center";
+    ctx.fillText(discovered ? npc.name : "???", pageCX, npcCY + 60);
+
+    if (discovered) {
+      ctx.font = "12px sans-serif";
+      const bw = ctx.measureText(npc.role).width + 16;
+      const bx = pageCX - bw / 2;
+      ctx.fillStyle = "rgba(92,46,8,0.15)";
+      ctx.beginPath();
+      ctx.roundRect(bx, npcCY + 66, bw, 20, 6);
+      ctx.fill();
+      ctx.fillStyle = "#5c2e08";
+      ctx.font = "bold 12px sans-serif";
+      ctx.fillText(npc.role, pageCX, npcCY + 80);
+
+      ctx.strokeStyle = "#c8a060";
+      ctx.lineWidth = 0.8;
+      ctx.globalAlpha = 0.5;
+      ctx.beginPath();
+      ctx.moveTo(parchX + 30, npcCY + 94);
+      ctx.lineTo(parchX + parchW - 30, npcCY + 94);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+
+      ctx.fillStyle = "#5c3010";
+      ctx.font = "13px serif";
+      ctx.textAlign = "center";
+      const maxDescW = parchW - 60;
+      const words = npc.description.split(" ");
+      let line = "";
+      let lineY = npcCY + 116;
+      for (const word of words) {
+        const test = line ? line + " " + word : word;
+        if (ctx.measureText(test).width > maxDescW) {
+          ctx.fillText(line, pageCX, lineY);
+          line = word;
+          lineY += 18;
+        } else {
+          line = test;
+        }
+      }
+      if (line) ctx.fillText(line, pageCX, lineY);
+    } else {
+      ctx.fillStyle = "#aaa";
+      ctx.font = "13px serif";
+      ctx.textAlign = "center";
+      ctx.fillText("Personagem não encontrado.", pageCX, npcCY + 112);
+    }
+
+    ctx.restore();
+
+    if (NPC_ENTRIES.length > 1) {
+      this.renderBookNav(
+        parchX,
+        parchY,
+        parchW,
+        parchH,
+        BX,
+        BW,
+        this.bookPage,
+        NPC_ENTRIES.length,
+      );
+    }
+
+    const discCount = NPC_ENTRIES.filter((n) =>
+      this.discoveredNPCs.has(n.id),
+    ).length;
+    ctx.fillStyle = "#887050";
+    ctx.font = "10px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(
+      `Encontrados: ${discCount} / ${NPC_ENTRIES.length}`,
+      BX + BW / 2,
+      parchY + parchH - 6,
+    );
+  }
+
+  private renderBookNav(
+    parchX: number,
+    parchY: number,
+    parchW: number,
+    parchH: number,
+    BX: number,
+    BW: number,
+    page: number,
+    total: number,
+  ) {
+    const { ctx } = this;
     const navY = parchY + parchH - 44;
     const prevCX = BX + BW / 2 - 70;
     const nextCX = BX + BW / 2 + 70;
 
-    // Prev
-    const canPrev = this.bookPage > 0;
+    const canPrev = page > 0;
     this.drawPixelBtn(
       prevCX - 28,
       navY - 16,
@@ -3850,17 +4344,11 @@ export class Game {
     ctx.textBaseline = "middle";
     ctx.fillText("◀  Ant.", prevCX, navY + 1);
 
-    // Page counter
     ctx.fillStyle = "#887050";
     ctx.font = "bold 13px serif";
-    ctx.fillText(
-      `${this.bookPage + 1} / ${COW_TYPES.length}`,
-      BX + BW / 2,
-      navY + 1,
-    );
+    ctx.fillText(`${page + 1} / ${total}`, BX + BW / 2, navY + 1);
 
-    // Next
-    const canNext = this.bookPage < COW_TYPES.length - 1;
+    const canNext = page < total - 1;
     this.drawPixelBtn(
       nextCX - 28,
       navY - 16,
@@ -3871,15 +4359,6 @@ export class Game {
     ctx.fillStyle = canNext ? "#FFD700" : "#888";
     ctx.fillText("Próx.  ▶", nextCX, navY + 1);
     ctx.textBaseline = "alphabetic";
-
-    // Keyboard hint
-    ctx.fillStyle = "#887050";
-    ctx.font = "10px sans-serif";
-    ctx.fillText(
-      "← → ou scroll para navegar",
-      BX + BW / 2,
-      parchY + parchH - 6,
-    );
   }
 
   // ─── Vendedor NPC ─────────────────────────────────────────────────────────
@@ -3997,7 +4476,16 @@ export class Game {
     ctx.fillText("🤠  Loja do Vaqueiro", PX + PW / 2, PY + 26);
     ctx.font = "bold 13px sans-serif";
     ctx.fillStyle = "#FFD700";
-    ctx.fillText(`💰 ${this.coins} moedas`, PX + PW / 2, PY + 48);
+    const coinsText = `${this.coins} moedas`;
+    const coinsTextWidth = ctx.measureText(coinsText).width;
+    ctx.drawImage(
+      this.icons.moneyIcon,
+      PX + PW / 2 - coinsTextWidth / 2 - 20,
+      PY + 38,
+      16,
+      16,
+    );
+    ctx.fillText(coinsText, PX + PW / 2, PY + 48);
 
     // ── Close button ──────────────────────────────────────────────────────────
     const closeCX = PX + PW - 18,
@@ -4097,7 +4585,8 @@ export class Game {
       const price = COW_SELL_PRICES[cow.type.rarity] ?? 10;
       ctx.font = "10px sans-serif";
       ctx.fillStyle = "#FFD700";
-      ctx.fillText(`💰 ${price}`, textX, rowY + 44);
+      ctx.drawImage(this.icons.moneyIcon, textX, rowY + 34, 12, 12);
+      ctx.fillText(`${price}`, textX + 14, rowY + 44);
       const bW = 64,
         bH = 24;
       const bX = PX + PW - bW - 12,
@@ -4131,7 +4620,16 @@ export class Game {
       ctx.font = "bold 12px sans-serif";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.fillText(`Vender Tudo  💰 ${total}`, bX + bW / 2, bY + bH / 2);
+      const sellAllText = `Vender Tudo  ${total}`;
+      const sellAllTextWidth = ctx.measureText(sellAllText).width;
+      ctx.drawImage(
+        this.icons.moneyIcon,
+        bX + bW / 2 - sellAllTextWidth / 2 + 68,
+        bY + bH / 2 - 7,
+        14,
+        14,
+      );
+      ctx.fillText(`Vender Tudo       ${total}`, bX + bW / 2, bY + bH / 2);
       ctx.textBaseline = "alphabetic";
       return { x: bX, y: bY, w: bW, h: bH };
     };
@@ -4213,7 +4711,31 @@ export class Game {
     } else {
       this.shopBuyButtons = [];
       let cy = contentY + 8;
-      const itemH = 72;
+      const btnW = 72;
+      const textMaxWidth = PW - 50 - btnW - 24; // largura disponível para descrição
+
+      // Helper para quebrar texto em linhas
+      const wrapText = (
+        text: string,
+        maxWidth: number,
+        font: string,
+      ): string[] => {
+        ctx.font = font;
+        const words = text.split(" ");
+        const lines: string[] = [];
+        let currentLine = "";
+        for (const word of words) {
+          const testLine = currentLine ? currentLine + " " + word : word;
+          if (ctx.measureText(testLine).width > maxWidth && currentLine) {
+            lines.push(currentLine);
+            currentLine = word;
+          } else {
+            currentLine = testLine;
+          }
+        }
+        if (currentLine) lines.push(currentLine);
+        return lines;
+      };
 
       for (const item of SHOP_ITEMS) {
         const level = this.inventory.get(item.id) ?? 0;
@@ -4221,15 +4743,47 @@ export class Game {
         const price = maxed ? 0 : itemNextPrice(item, level);
         const canAfford = !maxed && this.coins >= price;
 
+        // Calcula linhas da descrição
+        const descLines = wrapText(
+          item.description,
+          textMaxWidth,
+          "10px sans-serif",
+        );
+        const itemH = 72 + (descLines.length - 1) * 12;
+
         // Row bg
         ctx.fillStyle = "rgba(255,255,255,0.03)";
         ctx.fillRect(PX + 6, cy, PW - 12, itemH - 2);
 
-        // Icon
-        ctx.font = "28px sans-serif";
-        ctx.textAlign = "center";
-        ctx.fillStyle = "#FFE0A0";
-        ctx.fillText(item.icon, PX + 28, cy + 36);
+        // Icon background
+        const iconX = PX + 28;
+        const iconY = cy + 36;
+        ctx.fillStyle = "rgba(200,160,80,0.25)";
+        ctx.beginPath();
+        ctx.arc(iconX, iconY, 18, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "rgba(180,130,40,0.4)";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(iconX, iconY, 18, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Icon (image or emoji)
+        const shopItemImg = this.itemIcons.get(item.id);
+        if (
+          shopItemImg &&
+          shopItemImg.complete &&
+          shopItemImg.naturalWidth > 0
+        ) {
+          ctx.drawImage(shopItemImg, iconX - 12, iconY - 12, 24, 24);
+        } else {
+          ctx.font = "22px sans-serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillStyle = "#FFE0A0";
+          ctx.fillText(item.icon, iconX, iconY);
+          ctx.textBaseline = "alphabetic";
+        }
 
         // Name
         ctx.textAlign = "left";
@@ -4237,17 +4791,22 @@ export class Game {
         ctx.fillStyle = "#FFE0A0";
         ctx.fillText(item.name, PX + 50, cy + 18);
 
-        // Description
+        // Description (múltiplas linhas)
         ctx.font = "10px sans-serif";
         ctx.fillStyle = "#C8A870";
-        ctx.fillText(item.description, PX + 50, cy + 32);
+        let descY = cy + 32;
+        for (const line of descLines) {
+          ctx.fillText(line, PX + 50, descY);
+          descY += 12;
+        }
 
-        // Level pips
+        // Level pips (ajustado para após a descrição)
+        const pipsY = cy + 32 + descLines.length * 12 + 4;
         ctx.fillStyle = "#9b7e57";
         for (let i = 0; i < item.maxLevel; i++) {
           ctx.fillStyle = i < level ? "#FFD700" : "#3a2208";
           ctx.beginPath();
-          ctx.arc(PX + 52 + i * 14, cy + 48, 5, 0, Math.PI * 2);
+          ctx.arc(PX + 52 + i * 14, pipsY, 5, 0, Math.PI * 2);
           ctx.fill();
           ctx.strokeStyle = "#9b7e57";
           ctx.lineWidth = 1;
@@ -4259,7 +4818,7 @@ export class Game {
         ctx.fillText(
           `Nível ${level}/${item.maxLevel}`,
           PX + 52 + item.maxLevel * 14 + 4,
-          cy + 52,
+          pipsY + 4,
         );
 
         // Buy button
@@ -4280,7 +4839,16 @@ export class Game {
           ctx.font = "bold 10px sans-serif";
           ctx.textAlign = "center";
           ctx.textBaseline = "middle";
-          ctx.fillText(`💰 ${price}`, bX + bW / 2, bY + bH / 2);
+          const priceText = `${price}`;
+          const priceTextWidth = ctx.measureText(priceText).width;
+          ctx.drawImage(
+            this.icons.moneyIcon,
+            bX + bW / 2 - priceTextWidth / 2 - 16,
+            bY + bH / 2 - 6,
+            12,
+            12,
+          );
+          ctx.fillText(priceText, bX + bW / 2, bY + bH / 2);
           if (canAfford)
             this.shopBuyButtons.push({ item, x: bX, y: bY, w: bW, h: bH });
         }
