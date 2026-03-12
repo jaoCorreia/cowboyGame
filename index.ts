@@ -2,14 +2,8 @@ import { MongoClient, ObjectId } from "mongodb";
 import { checkServerIdentity as tlsCheckServerIdentity } from "tls";
 import index from "./index.html";
 
-// ─── Banco de dados (MongoDB) ─────────────────────────────────────────────────
-
 const MONGO_URI = process.env.MONGO_URI;
 if (!MONGO_URI) throw new Error("MONGO_URI environment variable is not set");
-
-// Bun has a bug where checkServerIdentity receives a null cert during TLS
-// handshake with MongoDB Atlas, crashing the process. Guard against it while
-// still performing the real check when the cert is properly available.
 const mongo = new MongoClient(MONGO_URI, {
   serverSelectionTimeoutMS: 10_000,
   checkServerIdentity: (host, cert) => {
@@ -30,7 +24,6 @@ try {
 const db = mongo.db("cowboyGame");
 const users = db.collection("users");
 
-// Índice único para username (case-insensitive)
 await users.createIndex(
   { username: 1 },
   { unique: true, collation: { locale: "en", strength: 2 } },
@@ -44,11 +37,10 @@ interface UserDoc {
   basedCount: number;
   discoveredTypes: string[];
   capturedByType: Record<string, number>;
-  basedCows: string[]; // IDs dos tipos de vaca na base
+  basedCows: string[]; 
   coins: number;
+  inventory: Record<string, number>;
 }
-
-// ─── Sessões em memória ───────────────────────────────────────────────────────
 
 interface Session {
   userId: string;
@@ -57,7 +49,9 @@ interface Session {
 }
 const sessions = new Map<string, Session>();
 
-// ─── Cor determinística por username ─────────────────────────────────────────
+const activeTokenByUserId = new Map<string, string>();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const activeWsByUserId = new Map<string, any>();
 
 const PLAYER_COLORS = [
   "#4a90d9",
@@ -80,8 +74,6 @@ function colorForUsername(username: string): string {
   return PLAYER_COLORS[Math.abs(h) % PLAYER_COLORS.length]!;
 }
 
-// ─── Posição de slot no curral (mesma fórmula do cliente em constants.ts) ─────
-
 const BASE_COL_S = 4,
   BASE_ROW_S = 4,
   SLOT_COLS = 5,
@@ -93,8 +85,6 @@ function userSlotToPos(slot: number) {
     row: BASE_ROW_S + 0.5 + Math.floor(slot / SLOT_COLS) * SLOT_GAP,
   };
 }
-
-// ─── Estado dos jogadores conectados ─────────────────────────────────────────
 
 interface PlayerState {
   id: string;
@@ -159,14 +149,13 @@ server = Bun.serve<WsData>({
         capturedByType: {},
         basedCows: [],
         coins: 0,
+        inventory: {},
       } as Omit<UserDoc, "_id">);
 
+      const newUserId = result.insertedId.toString();
       const token = crypto.randomUUID();
-      sessions.set(token, {
-        userId: result.insertedId.toString(),
-        username,
-        color,
-      });
+      sessions.set(token, { userId: newUserId, username, color });
+      activeTokenByUserId.set(newUserId, token);
       return Response.json({
         token,
         username,
@@ -176,6 +165,7 @@ server = Bun.serve<WsData>({
         capturedByType: {},
         basedCows: [],
         coins: 0,
+        inventory: {},
       });
     },
 
@@ -202,12 +192,33 @@ server = Bun.serve<WsData>({
           { status: 401 },
         );
 
+      const loginUserId = row._id.toString();
+      const oldToken = activeTokenByUserId.get(loginUserId);
+
+      if (oldToken) {
+        sessions.delete(oldToken);
+        const oldWs = activeWsByUserId.get(loginUserId);
+        if (oldWs) {
+          try {
+            oldWs.send(JSON.stringify({ type: "kicked" }));
+          } catch {
+            /* ignorar */
+          }
+          try {
+            oldWs.close();
+          } catch {
+            /* ignorar */
+          }
+        }
+      }
+
       const token = crypto.randomUUID();
       sessions.set(token, {
-        userId: row._id.toString(),
+        userId: loginUserId,
         username: row.username,
         color: row.color,
       });
+      activeTokenByUserId.set(loginUserId, token);
       return Response.json({
         token,
         username: row.username,
@@ -217,6 +228,7 @@ server = Bun.serve<WsData>({
         capturedByType: row.capturedByType ?? {},
         basedCows: row.basedCows ?? [],
         coins: row.coins ?? 0,
+        inventory: row.inventory ?? {},
       });
     },
 
@@ -246,6 +258,7 @@ server = Bun.serve<WsData>({
         capturedByType: row.capturedByType ?? {},
         basedCows: row.basedCows ?? [],
         coins: row.coins ?? 0,
+        inventory: row.inventory ?? {},
       });
     },
 
@@ -259,6 +272,7 @@ server = Bun.serve<WsData>({
         capturedByType?: Record<string, number>;
         basedCowTypes?: string[];
         coins?: number;
+        inventory?: Record<string, number>;
       };
       const sess = sessions.get(body.token ?? "");
       if (!sess) return new Response("Unauthorized", { status: 401 });
@@ -273,9 +287,14 @@ server = Bun.serve<WsData>({
             basedCows: Array.isArray(body.basedCowTypes)
               ? body.basedCowTypes
               : [],
-            coins: typeof body.coins === "number" && body.coins >= 0
-              ? Math.floor(body.coins)
-              : 0,
+            coins:
+              typeof body.coins === "number" && body.coins >= 0
+                ? Math.floor(body.coins)
+                : 0,
+            inventory:
+              body.inventory && typeof body.inventory === "object"
+                ? body.inventory
+                : {},
           },
         },
       );
@@ -311,6 +330,9 @@ server = Bun.serve<WsData>({
   websocket: {
     async open(ws) {
       const { id, username, color, userId } = ws.data;
+
+      // Registra este WS como a conexão ativa do usuário
+      activeWsByUserId.set(userId, ws);
 
       // Carrega vacas salvas no MongoDB para este jogador
       const row = (await users.findOne({
@@ -356,6 +378,7 @@ server = Bun.serve<WsData>({
       };
       players.set(id, state);
       ws.subscribe("game");
+      ws.subscribe(`player:${id}`);
       ws.publish(
         "game",
         JSON.stringify({
@@ -434,9 +457,14 @@ server = Bun.serve<WsData>({
                 basedCows: Array.isArray(u.basedCowTypes)
                   ? u.basedCowTypes
                   : [],
-                coins: typeof u.coins === "number" && u.coins >= 0
-                  ? Math.floor(u.coins)
-                  : 0,
+                coins:
+                  typeof u.coins === "number" && u.coins >= 0
+                    ? Math.floor(u.coins)
+                    : 0,
+                inventory:
+                  u.inventory && typeof u.inventory === "object"
+                    ? u.inventory
+                    : {},
               },
             },
           );
@@ -453,6 +481,29 @@ server = Bun.serve<WsData>({
             ws.publish("game", chatMsg);
             ws.send(chatMsg);
           }
+        } else if (u.type === "trade_offer" && typeof u.toId === "string" && typeof u.itemId === "string") {
+          const level = typeof u.level === "number" ? Math.max(1, Math.floor(u.level)) : 1;
+          server.publish(
+            `player:${u.toId}`,
+            JSON.stringify({
+              type: "trade_offer",
+              fromId: id,
+              fromName: player.name,
+              fromColor: player.color,
+              itemId: String(u.itemId).slice(0, 64),
+              level,
+            }),
+          );
+        } else if (u.type === "trade_accept" && typeof u.fromId === "string") {
+          server.publish(
+            `player:${u.fromId}`,
+            JSON.stringify({ type: "trade_accepted", fromId: id }),
+          );
+        } else if (u.type === "trade_decline" && typeof u.fromId === "string") {
+          server.publish(
+            `player:${u.fromId}`,
+            JSON.stringify({ type: "trade_declined", fromId: id }),
+          );
         }
       } catch {
         /* ignora */
@@ -460,9 +511,15 @@ server = Bun.serve<WsData>({
     },
 
     close(ws) {
-      const { id } = ws.data;
+      const { id, userId } = ws.data;
       players.delete(id);
       ws.publish("game", JSON.stringify({ type: "leave", id }));
+      if (
+        (activeWsByUserId.get(userId) as { data?: { id: string } } | undefined)
+          ?.data?.id === id
+      ) {
+        activeWsByUserId.delete(userId);
+      }
     },
   },
 });

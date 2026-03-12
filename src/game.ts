@@ -28,21 +28,19 @@ import {
   COW_SELL_PRICES,
 } from "./constants";
 
-/** Posição isométrica do slot de curral pelo índice do usuário (mesma fórmula do servidor). */
 function basedSlotPos(slot: number) {
   return {
     col: BASE_COL + 0.5 + (slot % BASE_SLOT_COLS) * BASE_SLOT_GAP,
     row: BASE_ROW + 0.5 + Math.floor(slot / BASE_SLOT_COLS) * BASE_SLOT_GAP,
   };
 }
+
 import { type Tile, type TileType, generateMap, isObstacle } from "./mapGen";
 import { type CowType, COW_TYPES, randomCowType } from "./cowTypes";
 import { sprites } from "./sprites";
 import { Network, type RemotePlayer, type ChatMessage } from "./network";
 import { type UserData, saveGameState } from "./auth";
 import { type GameItem, SHOP_ITEMS, itemNextPrice } from "./items";
-
-// ─── Types ─────────────────────────────────────────────────────────────────
 
 interface Player {
   col: number;
@@ -86,26 +84,18 @@ interface Joystick {
   dy: number;
 }
 
-// Stake (grappling hook across rivers)
 type StakePhase = "idle" | "aiming" | "flying" | "anchored" | "pulling";
 interface StakeData {
   phase: StakePhase;
-  // where the stake is going / landed (grid coords)
   targetCol: number;
   targetRow: number;
-  // stake position during flight (interpolated)
   flyCol: number;
   flyRow: number;
-  // player origin when pull started
   pullStartCol: number;
   pullStartRow: number;
-  // 0-1 progress for pull animation
   pullT: number;
-  // total distance for pull (tiles)
   pullDist: number;
 }
-
-// ─── Helpers ────────────────────────────────────────────────────────────────
 
 function dist(
   a: { col: number; row: number },
@@ -137,8 +127,6 @@ function spawnCow(id: number, map: Tile[][]): Cow {
   };
 }
 
-// ─── Game ───────────────────────────────────────────────────────────────────
-
 export class Game {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
@@ -163,8 +151,6 @@ export class Game {
   private time = 0;
   private isPreview = false;
   private rafId = 0;
-
-  // Multiplayer
   private network?: Network;
   private remotePlayers = new Map<string, RemotePlayer>();
   private remoteCowsInBase = new Map<
@@ -179,24 +165,17 @@ export class Game {
   private saveTimer = 60;
   private cowSpawnTimer = 45; // tempo até o próximo spawn de vaca
   private nextCowId = COW_COUNT;
-
-  // Chat
   private chatMessages: Array<ChatMessage & { time: number }> = [];
   private chatOpen = false;
   private chatInput?: HTMLInputElement;
-
-  // Cowboy Book
   private bookOpen = false;
   private bookPage = 0; // page index currently displayed
   private bookPageTarget = 0; // page we are flipping towards
   private bookPageAnimT = 1; // 0 = flip in progress, 1 = settled
-  private bookPageAnimDir = 1; // +1 = forward, -1 = backward
   private chatHistoryScroll = 0; // msgs scrolled up from bottom (0 = at bottom)
   private statsMinimized = false;
   private discovered = new Set<string>();
   private capturedByType = new Map<string, number>();
-
-  // Moedas, Inventário e Loja
   private coins = 0;
   private inventory = new Map<string, number>(); // itemId → level
   private shopOpen = false;
@@ -233,6 +212,51 @@ export class Game {
   }> = [];
   private shopCloseBtn = { x: 0, y: 0, r: 0 };
 
+  // Inventário
+  private inventoryOpen = false;
+  private inventoryCloseBtn = { x: 0, y: 0, r: 0 };
+  private inventoryDropBtns: Array<{
+    item: GameItem;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+  }> = [];
+  private inventoryTradeBtns: Array<{
+    item: GameItem;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+  }> = [];
+
+  // Sistema de troca
+  private tradeState: "idle" | "selecting" | "waiting" | "incoming" | "result" =
+    "idle";
+  private tradeItem: GameItem | null = null;
+  private tradeItemLevel = 0;
+  private tradeIncoming: {
+    fromId: string;
+    fromName: string;
+    fromColor: string;
+    item: GameItem;
+    level: number;
+  } | null = null;
+  private tradePlayerBtns: Array<{
+    playerId: string;
+    name: string;
+    color: string;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+  }> = [];
+  private tradeAcceptBtn = { x: 0, y: 0, w: 0, h: 0 };
+  private tradeDeclineBtn = { x: 0, y: 0, w: 0, h: 0 };
+  private tradeCancelBtn = { x: 0, y: 0, w: 0, h: 0 };
+  private tradeResultMsg = "";
+  private tradeResultTimer = 0;
+
   // Stake (grappling hook)
   private stake: StakeData = {
     phase: "idle",
@@ -245,6 +269,7 @@ export class Game {
     pullT: 0,
     pullDist: 1,
   };
+  bookPageAnimDir!: number;
 
   constructor(canvas: HTMLCanvasElement, userData: UserData | null) {
     this.canvas = canvas;
@@ -312,11 +337,13 @@ export class Game {
       stakeIcon: new Image(),
       eyeIcon: new Image(),
       spaceKey: new Image(),
+      trunkIcon: new Image(),
     };
 
     this.icons.bookIcon.src = "/sprites/hud/icons/book_icon.png";
     this.icons.stakeIcon.src = "/sprites/hud/icons/stake_icon.png";
     this.icons.eyeIcon.src = "/sprites/hud/icons/eye_icon.png";
+    this.icons.trunkIcon.src = "/sprites/hud/icons/trunk_icon.png";
     this.icons.pull.src = "/sprites/hud/icons/lasso_icon.png";
     this.icons.base.src = "/sprites/hud/icons/key_icon.png";
     this.icons.cowboy.src = "/sprites/hud/icons/lasso_icon.png";
@@ -372,6 +399,39 @@ export class Game {
         onChat: (msg) => {
           this.chatMessages.push({ ...msg, time: Date.now() });
           if (this.chatMessages.length > 50) this.chatMessages.shift();
+        },
+        onKicked: () => {
+          localStorage.removeItem("cowboy_token");
+          alert(
+            "Sua conta foi acessada em outro dispositivo. Você foi desconectado.",
+          );
+          location.reload();
+        },
+        onTradeOffer: (offer) => {
+          const item = SHOP_ITEMS.find((it) => it.id === offer.itemId);
+          if (!item) return;
+          this.tradeIncoming = { ...offer, item };
+          this.tradeState = "incoming";
+          this.inventoryOpen = true; // abre inventário para mostrar a oferta
+        },
+        onTradeAccepted: (_fromId) => {
+          // Transferir item para o outro jogador
+          if (this.tradeItem) {
+            const cur = this.inventory.get(this.tradeItem.id) ?? 0;
+            if (cur <= 1) this.inventory.delete(this.tradeItem.id);
+            else this.inventory.set(this.tradeItem.id, cur - 1);
+          }
+          this.tradeResultMsg = "✅ Troca realizada!";
+          this.tradeState = "result";
+          this.tradeResultTimer = 2.5;
+          this.tradeItem = null;
+          this.triggerSave();
+        },
+        onTradeDeclined: (_fromId) => {
+          this.tradeResultMsg = "❌ Troca recusada.";
+          this.tradeState = "result";
+          this.tradeResultTimer = 2.0;
+          this.tradeItem = null;
         },
       });
 
@@ -489,7 +549,6 @@ export class Game {
       if (e.key === " " || e.key.toLowerCase() === "e") this.handleAction();
       if (e.key.toLowerCase() === "b") this.toggleBook();
       if (e.key.toLowerCase() === "q") this.toggleStakeAim();
-      // Book page navigation with arrow keys
       if (this.bookOpen) {
         if (e.key === "ArrowRight" || e.key === "ArrowDown") {
           this.bookFlipPage(1);
@@ -508,12 +567,26 @@ export class Game {
         return;
       }
       if (e.key === "Escape") {
+        if (this.tradeState !== "idle") {
+          this.tradeState = "idle";
+          this.tradeItem = null;
+          this.tradeIncoming = null;
+          return;
+        }
+        if (this.inventoryOpen) {
+          this.inventoryOpen = false;
+          return;
+        }
         if (this.shopOpen) {
           this.shopOpen = false;
           return;
         }
         if (this.stake.phase === "aiming") this.stake.phase = "idle";
         else this.toggleBook();
+      }
+      if (e.key.toLowerCase() === "i") {
+        this.inventoryOpen = !this.inventoryOpen;
+        e.preventDefault();
       }
     });
     window.addEventListener("keyup", (e) =>
@@ -651,7 +724,6 @@ export class Game {
       return; // swallow input while shop is open
     }
 
-    // Book close button — match the rendered close-btn centre exactly
     if (this.bookOpen) {
       const BW = Math.min(W - 32, 500),
         BH = Math.min(H - 32, 620);
@@ -699,6 +771,116 @@ export class Game {
         this.statsMinimized = true;
         return;
       }
+    }
+
+    // Inventory panel interaction
+    if (this.inventoryOpen) {
+      // Close button
+      if (
+        Math.hypot(x - this.inventoryCloseBtn.x, y - this.inventoryCloseBtn.y) <
+        this.inventoryCloseBtn.r + 6
+      ) {
+        if (this.tradeState !== "idle") {
+          this.tradeState = "idle";
+          this.tradeItem = null;
+          this.tradeIncoming = null;
+        } else this.inventoryOpen = false;
+        return;
+      }
+      if (this.tradeState === "incoming") {
+        const ab = this.tradeAcceptBtn,
+          db = this.tradeDeclineBtn;
+        if (
+          ab.w > 0 &&
+          x >= ab.x &&
+          x <= ab.x + ab.w &&
+          y >= ab.y &&
+          y <= ab.y + ab.h
+        ) {
+          this.acceptIncomingTrade();
+          return;
+        }
+        if (
+          db.w > 0 &&
+          x >= db.x &&
+          x <= db.x + db.w &&
+          y >= db.y &&
+          y <= db.y + db.h
+        ) {
+          this.declineIncomingTrade();
+          return;
+        }
+      } else if (this.tradeState === "selecting") {
+        for (const btn of this.tradePlayerBtns) {
+          if (
+            x >= btn.x &&
+            x <= btn.x + btn.w &&
+            y >= btn.y &&
+            y <= btn.y + btn.h
+          ) {
+            this.confirmTradeOffer(btn.playerId);
+            return;
+          }
+        }
+        const cb = this.tradeCancelBtn;
+        if (
+          cb.w > 0 &&
+          x >= cb.x &&
+          x <= cb.x + cb.w &&
+          y >= cb.y &&
+          y <= cb.y + cb.h
+        ) {
+          this.tradeState = "idle";
+          this.tradeItem = null;
+          return;
+        }
+      } else if (this.tradeState === "waiting") {
+        const cb = this.tradeCancelBtn;
+        if (
+          cb.w > 0 &&
+          x >= cb.x &&
+          x <= cb.x + cb.w &&
+          y >= cb.y &&
+          y <= cb.y + cb.h
+        ) {
+          this.tradeState = "idle";
+          this.tradeItem = null;
+          return;
+        }
+      } else {
+        // Normal inventory — drop and trade buttons
+        for (const btn of this.inventoryDropBtns) {
+          if (
+            x >= btn.x &&
+            x <= btn.x + btn.w &&
+            y >= btn.y &&
+            y <= btn.y + btn.h
+          ) {
+            this.dropItem(btn.item);
+            return;
+          }
+        }
+        for (const btn of this.inventoryTradeBtns) {
+          if (
+            x >= btn.x &&
+            x <= btn.x + btn.w &&
+            y >= btn.y &&
+            y <= btn.y + btn.h
+          ) {
+            this.startTradeOffer(btn.item);
+            return;
+          }
+        }
+      }
+      return; // swallow all input while inventory open
+    }
+
+    // Inventory button (top-right, below book button)
+    const invBtnX = W - 80,
+      invBtnY = H - 330;
+    if (x >= invBtnX - 30 && x <= invBtnX + 30 && y >= invBtnY - 30 && y <= invBtnY + 30) {
+      this.inventoryOpen = !this.inventoryOpen;
+      return;
     }
 
     // Book button (top-right HUD area)
@@ -753,6 +935,7 @@ export class Game {
         Math.hypot(x - s.x, y - (s.y - 12)) < 34 &&
         dist(this.player, cow) <= this.effectiveCaptureRange
       ) {
+        if (this.herdCows().length >= this.effectiveHerdCapacity) return;
         this.startLasso(cow);
         return;
       }
@@ -800,7 +983,12 @@ export class Game {
       return;
     }
     const cow = this.nearestWanderingCow();
-    if (cow && dist(this.player, cow) <= this.effectiveCaptureRange) this.startLasso(cow);
+    if (
+      cow &&
+      dist(this.player, cow) <= this.effectiveCaptureRange &&
+      this.herdCows().length < this.effectiveHerdCapacity
+    )
+      this.startLasso(cow);
   }
 
   private toggleBook() {
@@ -891,6 +1079,12 @@ export class Game {
       this.updateCows(dt);
     } else {
       this.updateLasso(dt);
+    }
+
+    // Trade result timer
+    if (this.tradeState === "result" && this.tradeResultTimer > 0) {
+      this.tradeResultTimer -= dt;
+      if (this.tradeResultTimer <= 0) this.tradeState = "idle";
     }
 
     // Envio de posição para outros jogadores (20 vezes/seg)
@@ -1048,11 +1242,17 @@ export class Game {
       dr /= len;
       const nc = Math.max(
         0.5,
-        Math.min(MAP_COLS - 1.5, this.player.col + dc * this.effectiveSpeed * dt),
+        Math.min(
+          MAP_COLS - 1.5,
+          this.player.col + dc * this.effectiveSpeed * dt,
+        ),
       );
       const nr = Math.max(
         0.5,
-        Math.min(MAP_ROWS - 1.5, this.player.row + dr * this.effectiveSpeed * dt),
+        Math.min(
+          MAP_ROWS - 1.5,
+          this.player.row + dr * this.effectiveSpeed * dt,
+        ),
       );
       const tc = this.map[Math.floor(nr)]![Math.floor(nc)]!;
       if (!isObstacle(tc)) {
@@ -1269,6 +1469,10 @@ export class Game {
     return Math.max(1, base - (this.inventory.get("lasso_forte") ?? 0) * 3);
   }
 
+  private get effectiveHerdCapacity() {
+    return 1 + (this.inventory.get("lasso_extra") ?? 0);
+  }
+
   private isAtVendor() {
     return (
       dist(this.player, { col: VENDOR_COL, row: VENDOR_ROW }) <=
@@ -1356,6 +1560,52 @@ export class Game {
   private basedCows() {
     return this.cows.filter((c) => c.state === "based");
   }
+
+  private dropItem(item: GameItem) {
+    const cur = this.inventory.get(item.id) ?? 0;
+    if (cur <= 0) return;
+    if (cur <= 1) this.inventory.delete(item.id);
+    else this.inventory.set(item.id, cur - 1);
+    this.triggerSave();
+  }
+
+  private startTradeOffer(item: GameItem) {
+    this.tradeItem = item;
+    this.tradeItemLevel = this.inventory.get(item.id) ?? 1;
+    this.tradeState = "selecting";
+  }
+
+  private confirmTradeOffer(playerId: string) {
+    if (!this.tradeItem) return;
+    this.network?.sendTradeOffer(
+      playerId,
+      this.tradeItem.id,
+      this.tradeItemLevel,
+    );
+    this.tradeState = "waiting";
+  }
+
+  private acceptIncomingTrade() {
+    if (!this.tradeIncoming) return;
+    const { fromId, item, level } = this.tradeIncoming;
+    // Add item to own inventory
+    const cur = this.inventory.get(item.id) ?? 0;
+    this.inventory.set(item.id, Math.min(cur + level, item.maxLevel));
+    this.network?.sendTradeAccept(fromId);
+    this.tradeResultMsg = `✅ Recebeu ${item.name} Lv${level}!`;
+    this.tradeState = "result";
+    this.tradeResultTimer = 2.5;
+    this.tradeIncoming = null;
+    this.triggerSave();
+  }
+
+  private declineIncomingTrade() {
+    if (!this.tradeIncoming) return;
+    this.network?.sendTradeDecline(this.tradeIncoming.fromId);
+    this.tradeIncoming = null;
+    this.tradeState = "idle";
+  }
+
   private nearestWanderingCow(): Cow | null {
     let best: Cow | null = null,
       bd = Infinity;
@@ -2510,7 +2760,9 @@ export class Game {
     this.renderStatsPanel();
     this.renderOnlinePanel(W, H);
     this.renderBookButton(W);
+    this.renderInventoryButton(W, H);
     this.renderChat(W, H);
+    if (this.inventoryOpen) this.renderInventory(W, H);
 
     // ── Lasso minigame or fail overlay ───────────────────────────────────────
     if (this.lasso.active && this.lasso.phase === "pulling")
@@ -2572,8 +2824,11 @@ export class Game {
       ctx.textBaseline = "alphabetic";
     } else {
       // ── Versão expandida ──
-      const PW = 210,
-        PH = 152;
+      const ownedItems = SHOP_ITEMS.filter(
+        (it) => (this.inventory.get(it.id) ?? 0) > 0,
+      );
+      const PW = 210;
+      const PH = 152 + (ownedItems.length > 0 ? 34 : 0);
       this.drawPanel(6, 6, PW, PH, 0);
 
       // Cabeçalho: cor + nome do jogador
@@ -2617,6 +2872,35 @@ export class Game {
         ctx.textAlign = "right";
         ctx.fillText(value, PW - 10, ry);
         ry += 20;
+      }
+
+      // ── Inventário (só mostra itens com level > 0) ────────────────────────
+      if (ownedItems.length > 0) {
+        const invY = ry + 4;
+        ctx.strokeStyle = "rgba(200,160,80,0.35)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(12, invY - 2);
+        ctx.lineTo(PW - 12, invY - 2);
+        ctx.stroke();
+
+        ctx.font = "10px sans-serif";
+        ctx.fillStyle = "#C8A870";
+        ctx.textAlign = "left";
+        ctx.fillText("🎒 Itens:", 14, invY + 12);
+
+        let ix = 72;
+        for (const item of ownedItems) {
+          const level = this.inventory.get(item.id) ?? 0;
+          // Badge: emoji icon + "Lv N"
+          ctx.font = "16px sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillText(item.icon, ix, invY + 16);
+          ctx.font = "bold 9px sans-serif";
+          ctx.fillStyle = "#FFD700";
+          ctx.fillText(`Lv${level}`, ix, invY + 27);
+          ix += 36;
+        }
       }
 
       // Botão recolher
@@ -2857,6 +3141,322 @@ export class Game {
     ctx.fillStyle = "#FFD700";
     ctx.font = "bold 9px sans-serif";
     ctx.fillText("LIVRO", bookCX, bookCY + 24);
+  }
+
+  private renderInventoryButton(W: number, H: number) {
+    const { ctx } = this;
+    const cx = W - 80, cy = H - 330;
+    const active = this.inventoryOpen;
+    this.drawPixelBtn(cx - 30, cy - 30, 60, 60, active ? "active" : "normal");
+    ctx.drawImage(this.icons.trunkIcon, cx - 16, cy - 16, 32, 32);
+    ctx.textAlign = "center";
+    ctx.fillStyle = active ? "#FFD700" : "#C8A870";
+    ctx.font = "bold 9px sans-serif";
+    ctx.fillText("Mochila", cx, cy + 36);
+  }
+
+  private renderInventory(W: number, H: number) {
+    const { ctx } = this;
+    const ownedItems = SHOP_ITEMS.filter(
+      (it) => (this.inventory.get(it.id) ?? 0) > 0,
+    );
+    const ROW_H = 72;
+    const PW = Math.min(W - 32, 400);
+    const HEADER_H = 56;
+    const contentH = ownedItems.length > 0 ? ownedItems.length * ROW_H : 60;
+    const PH = Math.min(H - 40, HEADER_H + contentH + 16);
+    const PX = (W - PW) / 2;
+    const PY = (H - PH) / 2;
+    ctx.fillStyle = "rgba(0,0,0,0.5)";
+    ctx.fillRect(0, 0, W, H);
+    this.drawPanel(PX, PY, PW, PH, 0);
+    ctx.textAlign = "center";
+    ctx.font = "bold 16px sans-serif";
+    ctx.fillStyle = "#FFD700";
+    ctx.fillText("🎒  Inventário", PX + PW / 2, PY + 26);
+    const closeCX = PX + PW - 18,
+      closeCY = PY + 18;
+    this.inventoryCloseBtn = { x: closeCX, y: closeCY, r: 12 };
+    ctx.fillStyle = "#9b3a18";
+    ctx.beginPath();
+    ctx.arc(closeCX, closeCY, 12, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "#e05030";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.fillStyle = "#FFE0A0";
+    ctx.font = "bold 13px sans-serif";
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "center";
+    ctx.fillText("✕", closeCX, closeCY);
+    ctx.textBaseline = "alphabetic";
+    ctx.strokeStyle = "rgba(200,160,80,0.4)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(PX + 10, PY + HEADER_H);
+    ctx.lineTo(PX + PW - 10, PY + HEADER_H);
+    ctx.stroke();
+    if (this.tradeState === "incoming" && this.tradeIncoming) {
+      this.renderTradeIncomingView(PX, PY + HEADER_H, PW, PH - HEADER_H);
+    } else if (this.tradeState === "selecting") {
+      this.renderTradeSelectView(PX, PY + HEADER_H, PW, PH - HEADER_H);
+    } else if (this.tradeState === "waiting") {
+      this.renderTradeWaitingView(PX, PY + HEADER_H, PW, PH - HEADER_H);
+    } else if (this.tradeState === "result") {
+      this.renderTradeResultView(PX, PY + HEADER_H, PW, PH - HEADER_H);
+    } else {
+      this.renderInventoryItems(
+        PX,
+        PY + HEADER_H,
+        PW,
+        PH - HEADER_H,
+        ownedItems,
+      );
+    }
+  }
+
+  private renderInventoryItems(
+    PX: number,
+    PY: number,
+    PW: number,
+    PH: number,
+    ownedItems: GameItem[],
+  ) {
+    const { ctx } = this;
+    this.inventoryDropBtns = [];
+    this.inventoryTradeBtns = [];
+    if (ownedItems.length === 0) {
+      ctx.font = "13px sans-serif";
+      ctx.fillStyle = "#7a6040";
+      ctx.textAlign = "center";
+      ctx.fillText(
+        "Nenhum item ainda — compre na loja!",
+        PX + PW / 2,
+        PY + PH / 2,
+      );
+      return;
+    }
+    const ROW_H = 72;
+    let cy = PY + 8;
+    for (let i = 0; i < ownedItems.length; i++) {
+      const item = ownedItems[i]!;
+      const level = this.inventory.get(item.id) ?? 0;
+      if (i % 2 === 0) {
+        ctx.fillStyle = "rgba(255,255,255,0.04)";
+        ctx.fillRect(PX + 6, cy, PW - 12, ROW_H - 2);
+      }
+      ctx.font = "28px sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#FFE0A0";
+      ctx.fillText(item.icon, PX + 30, cy + 36);
+      ctx.textAlign = "left";
+      ctx.font = "bold 12px sans-serif";
+      ctx.fillStyle = "#FFE0A0";
+      ctx.fillText(item.name, PX + 52, cy + 18);
+      ctx.font = "10px sans-serif";
+      ctx.fillStyle = "#C8A870";
+      ctx.fillText(item.description, PX + 52, cy + 32);
+      for (let p = 0; p < item.maxLevel; p++) {
+        ctx.fillStyle = p < level ? "#FFD700" : "#3a2208";
+        ctx.beginPath();
+        ctx.arc(PX + 54 + p * 14, cy + 50, 5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "#9b7e57";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+      ctx.font = "10px sans-serif";
+      ctx.fillStyle = "#C8A870";
+      ctx.textAlign = "left";
+      ctx.fillText(
+        `Lv ${level}/${item.maxLevel}`,
+        PX + 54 + item.maxLevel * 14 + 4,
+        cy + 54,
+      );
+      const bH = 26,
+        bW = 74;
+      const dropX = PX + PW - (bW + 6) * 2 - 8,
+        dropY = cy + (ROW_H - bH) / 2;
+      const tradeX = PX + PW - bW - 8,
+        tradeY = dropY;
+      this.drawPixelBtn(dropX, dropY, bW, bH, "normal");
+      ctx.fillStyle = "#FF9980";
+      ctx.font = "bold 10px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("🗑 Descartar", dropX + bW / 2, dropY + bH / 2);
+      this.drawPixelBtn(tradeX, tradeY, bW, bH, "normal");
+      ctx.fillStyle = "#FFD700";
+      ctx.fillText("↔ Trocar", tradeX + bW / 2, tradeY + bH / 2);
+      ctx.textBaseline = "alphabetic";
+      this.inventoryDropBtns.push({ item, x: dropX, y: dropY, w: bW, h: bH });
+      this.inventoryTradeBtns.push({
+        item,
+        x: tradeX,
+        y: tradeY,
+        w: bW,
+        h: bH,
+      });
+      cy += ROW_H;
+    }
+  }
+
+  private renderTradeIncomingView(
+    PX: number,
+    PY: number,
+    PW: number,
+    _PH: number,
+  ) {
+    const { ctx } = this;
+    const offer = this.tradeIncoming!;
+    ctx.textAlign = "center";
+    ctx.font = "bold 13px sans-serif";
+    ctx.fillStyle = "#FFE0A0";
+    ctx.fillText("Oferta de troca recebida!", PX + PW / 2, PY + 28);
+    ctx.font = "bold 11px sans-serif";
+    ctx.fillStyle = offer.fromColor;
+    ctx.fillText(`De: ${offer.fromName}`, PX + PW / 2, PY + 46);
+    ctx.font = "32px sans-serif";
+    ctx.fillStyle = "#FFE0A0";
+    ctx.fillText(offer.item.icon, PX + PW / 2, PY + 84);
+    ctx.font = "bold 12px sans-serif";
+    ctx.fillStyle = "#FFD700";
+    ctx.fillText(
+      `${offer.item.name}  Lv ${offer.level}`,
+      PX + PW / 2,
+      PY + 102,
+    );
+    ctx.font = "10px sans-serif";
+    ctx.fillStyle = "#C8A870";
+    ctx.fillText(offer.item.description, PX + PW / 2, PY + 116);
+    const bW = 110,
+      bH = 32;
+    const aX = PX + PW / 2 - bW - 8,
+      aY = PY + 132;
+    const dX = PX + PW / 2 + 8,
+      dY = PY + 132;
+    this.drawPixelBtn(aX, aY, bW, bH, "active");
+    ctx.fillStyle = "#FFD700";
+    ctx.font = "bold 12px sans-serif";
+    ctx.textBaseline = "middle";
+    ctx.fillText("✅ Aceitar", aX + bW / 2, aY + bH / 2);
+    this.drawPixelBtn(dX, dY, bW, bH, "normal");
+    ctx.fillStyle = "#FF9980";
+    ctx.fillText("❌ Recusar", dX + bW / 2, dY + bH / 2);
+    ctx.textBaseline = "alphabetic";
+    this.tradeAcceptBtn = { x: aX, y: aY, w: bW, h: bH };
+    this.tradeDeclineBtn = { x: dX, y: dY, w: bW, h: bH };
+  }
+
+  private renderTradeSelectView(
+    PX: number,
+    PY: number,
+    PW: number,
+    _PH: number,
+  ) {
+    const { ctx } = this;
+    this.tradePlayerBtns = [];
+    ctx.textAlign = "center";
+    ctx.font = "bold 13px sans-serif";
+    ctx.fillStyle = "#FFE0A0";
+    ctx.fillText(
+      `Enviar ${this.tradeItem?.icon ?? ""} ${this.tradeItem?.name ?? ""} para:`,
+      PX + PW / 2,
+      PY + 26,
+    );
+    const online = Array.from(this.remotePlayers.values());
+    let cy = PY + 42;
+    if (online.length === 0) {
+      ctx.font = "12px sans-serif";
+      ctx.fillStyle = "#7a6040";
+      ctx.fillText("Nenhum jogador online.", PX + PW / 2, cy + 20);
+    } else {
+      for (const rp of online.slice(0, 5)) {
+        const bW = PW - 40,
+          bH = 32;
+        const bX = PX + 20,
+          bY = cy;
+        this.drawPixelBtn(bX, bY, bW, bH, "normal");
+        ctx.fillStyle = rp.color;
+        ctx.beginPath();
+        ctx.arc(bX + 18, bY + bH / 2, 6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#FFE0A0";
+        ctx.font = "bold 12px sans-serif";
+        ctx.textAlign = "left";
+        ctx.fillText(rp.name, bX + 32, bY + bH / 2 + 4);
+        this.tradePlayerBtns.push({
+          playerId: rp.id,
+          name: rp.name,
+          color: rp.color,
+          x: bX,
+          y: bY,
+          w: bW,
+          h: bH,
+        });
+        cy += bH + 8;
+      }
+    }
+    const cW = 120,
+      cH = 28;
+    const cX = PX + (PW - cW) / 2,
+      cY = cy + 8;
+    this.drawPixelBtn(cX, cY, cW, cH, "pressed");
+    ctx.fillStyle = "#C8A870";
+    ctx.font = "bold 11px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("Cancelar", cX + cW / 2, cY + cH / 2);
+    ctx.textBaseline = "alphabetic";
+    this.tradeCancelBtn = { x: cX, y: cY, w: cW, h: cH };
+  }
+
+  private renderTradeWaitingView(
+    PX: number,
+    PY: number,
+    PW: number,
+    PH: number,
+  ) {
+    const { ctx } = this;
+    const pulse = 0.7 + 0.3 * Math.sin(this.time * 3);
+    ctx.globalAlpha = pulse;
+    ctx.textAlign = "center";
+    ctx.font = "bold 14px sans-serif";
+    ctx.fillStyle = "#FFD700";
+    ctx.fillText("⏳ Aguardando resposta...", PX + PW / 2, PY + PH / 2 - 12);
+    ctx.font = "11px sans-serif";
+    ctx.fillStyle = "#C8A870";
+    ctx.fillText(
+      `Oferecendo: ${this.tradeItem?.icon ?? ""} ${this.tradeItem?.name ?? ""}`,
+      PX + PW / 2,
+      PY + PH / 2 + 10,
+    );
+    ctx.globalAlpha = 1;
+    const cW = 120,
+      cH = 28;
+    const cX = PX + (PW - cW) / 2,
+      cY = PY + PH / 2 + 30;
+    this.drawPixelBtn(cX, cY, cW, cH, "pressed");
+    ctx.fillStyle = "#C8A870";
+    ctx.font = "bold 11px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("Cancelar", cX + cW / 2, cY + cH / 2);
+    ctx.textBaseline = "alphabetic";
+    this.tradeCancelBtn = { x: cX, y: cY, w: cW, h: cH };
+  }
+
+  private renderTradeResultView(
+    PX: number,
+    PY: number,
+    PW: number,
+    PH: number,
+  ) {
+    const { ctx } = this;
+    ctx.textAlign = "center";
+    ctx.font = "bold 15px sans-serif";
+    ctx.fillStyle = "#FFD700";
+    ctx.fillText(this.tradeResultMsg, PX + PW / 2, PY + PH / 2);
   }
 
   // ── Hint contextual ───────────────────────────────────────────────────────
@@ -3351,7 +3951,8 @@ export class Game {
 
   private renderShop() {
     const { ctx, canvas } = this;
-    const W = canvas.width, H = canvas.height;
+    const W = canvas.width,
+      H = canvas.height;
 
     const herd = this.herdCows();
     const based = this.basedCows().sort((a, b) => a.herdIndex - b.herdIndex);
@@ -3366,7 +3967,15 @@ export class Game {
       const herdSellAllH = herd.length > 0 ? 44 : 0;
       const basedRows = Math.max(1, Math.min(based.length, SELL_MAX));
       const basedSellAllH = based.length > 0 ? 44 : 0;
-      contentH = 24 + herdRows * ROW_H + herdSellAllH + 12 + 24 + basedRows * ROW_H + basedSellAllH + 8;
+      contentH =
+        24 +
+        herdRows * ROW_H +
+        herdSellAllH +
+        12 +
+        24 +
+        basedRows * ROW_H +
+        basedSellAllH +
+        8;
     } else {
       contentH = SHOP_ITEMS.length * 72 + 8;
     }
@@ -3391,20 +4000,26 @@ export class Game {
     ctx.fillText(`💰 ${this.coins} moedas`, PX + PW / 2, PY + 48);
 
     // ── Close button ──────────────────────────────────────────────────────────
-    const closeCX = PX + PW - 18, closeCY = PY + 18;
+    const closeCX = PX + PW - 18,
+      closeCY = PY + 18;
     this.shopCloseBtn = { x: closeCX, y: closeCY, r: 12 };
     ctx.fillStyle = "#9b3a18";
     ctx.beginPath();
     ctx.arc(closeCX, closeCY, 12, 0, Math.PI * 2);
     ctx.fill();
-    ctx.strokeStyle = "#e05030"; ctx.lineWidth = 1.5; ctx.stroke();
-    ctx.fillStyle = "#FFE0A0"; ctx.font = "bold 13px sans-serif";
-    ctx.textBaseline = "middle"; ctx.textAlign = "center";
+    ctx.strokeStyle = "#e05030";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.fillStyle = "#FFE0A0";
+    ctx.font = "bold 13px sans-serif";
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "center";
     ctx.fillText("✕", closeCX, closeCY);
     ctx.textBaseline = "alphabetic";
 
     // Divisor under header
-    ctx.strokeStyle = "rgba(200,160,80,0.4)"; ctx.lineWidth = 1;
+    ctx.strokeStyle = "rgba(200,160,80,0.4)";
+    ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(PX + 10, PY + HEADER_H);
     ctx.lineTo(PX + PW - 10, PY + HEADER_H);
@@ -3414,7 +4029,7 @@ export class Game {
     this.shopTabBtns = [];
     const tabLabels: Array<{ tab: "sell" | "buy"; label: string }> = [
       { tab: "sell", label: "🐄 Vender" },
-      { tab: "buy",  label: "🛒 Comprar" },
+      { tab: "buy", label: "🛒 Comprar" },
     ];
     const tabW = PW / tabLabels.length;
     const tabY = PY + HEADER_H;
@@ -3436,7 +4051,8 @@ export class Game {
     }
 
     // Divisor under tabs
-    ctx.strokeStyle = "rgba(200,160,80,0.4)"; ctx.lineWidth = 1;
+    ctx.strokeStyle = "rgba(200,160,80,0.4)";
+    ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(PX + 10, PY + HEADER_H + TAB_H);
     ctx.lineTo(PX + PW - 10, PY + HEADER_H + TAB_H);
@@ -3445,45 +4061,76 @@ export class Game {
     const contentY = PY + HEADER_H + TAB_H;
 
     // ── Helper: draw a cow row ─────────────────────────────────────────────────
-    const drawCowRow = (cow: Cow, rowY: number, rowIdx: number, btnArr: typeof this.shopSellButtons) => {
+    const drawCowRow = (
+      cow: Cow,
+      rowY: number,
+      rowIdx: number,
+      btnArr: typeof this.shopSellButtons,
+    ) => {
       if (rowIdx % 2 === 0) {
         ctx.fillStyle = "rgba(255,255,255,0.04)";
         ctx.fillRect(PX + 6, rowY, PW - 12, ROW_H);
       }
-      this.drawCowAt(PX + 30, rowY + ROW_H / 2, cow.type);
+      // Clip to row so cow drawing can't bleed outside
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(PX + 6, rowY, PW - 12, ROW_H);
+      ctx.clip();
+      // Draw cow centred vertically in the upper ⅔ of the row
+      this.drawCowAt(PX + 30, rowY + Math.round(ROW_H * 0.52), cow.type);
+      ctx.restore();
+      const textX = PX + 58;
       ctx.textAlign = "left";
       ctx.font = "bold 11px sans-serif";
       ctx.fillStyle = "#FFE0A0";
-      ctx.fillText(cow.type.name, PX + 52, rowY + 16);
+      ctx.fillText(cow.type.name, textX, rowY + 16);
       const rc = RARITY_COLORS[cow.type.rarity] ?? "#9e9e9e";
       const rl = RARITY_LABELS[cow.type.rarity] ?? cow.type.rarity;
       ctx.font = "9px sans-serif";
       const bw = ctx.measureText(rl).width + 8;
       ctx.fillStyle = rc + "33";
-      ctx.beginPath(); ctx.roundRect(PX + 52, rowY + 19, bw, 13, 3); ctx.fill();
-      ctx.fillStyle = rc; ctx.fillText(rl, PX + 56, rowY + 29);
+      ctx.beginPath();
+      ctx.roundRect(textX, rowY + 19, bw, 13, 3);
+      ctx.fill();
+      ctx.fillStyle = rc;
+      ctx.fillText(rl, textX + 4, rowY + 29);
       const price = COW_SELL_PRICES[cow.type.rarity] ?? 10;
-      ctx.font = "10px sans-serif"; ctx.fillStyle = "#FFD700";
-      ctx.fillText(`💰 ${price}`, PX + 52, rowY + 44);
-      const bW = 64, bH = 24;
-      const bX = PX + PW - bW - 12, bY = rowY + (ROW_H - bH) / 2;
+      ctx.font = "10px sans-serif";
+      ctx.fillStyle = "#FFD700";
+      ctx.fillText(`💰 ${price}`, textX, rowY + 44);
+      const bW = 64,
+        bH = 24;
+      const bX = PX + PW - bW - 12,
+        bY = rowY + (ROW_H - bH) / 2;
       this.drawPixelBtn(bX, bY, bW, bH, "normal");
-      ctx.fillStyle = "#FFD700"; ctx.font = "bold 10px sans-serif";
-      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillStyle = "#FFD700";
+      ctx.font = "bold 10px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
       ctx.fillText("Vender", bX + bW / 2, bY + bH / 2);
       ctx.textBaseline = "alphabetic";
       btnArr.push({ cow, x: bX, y: bY, w: bW, h: bH });
     };
 
     // ── Helper: "Vender Tudo" button ──────────────────────────────────────────
-    const drawSellAllBtn = (cows: Cow[], atY: number): { x: number; y: number; w: number; h: number } => {
+    const drawSellAllBtn = (
+      cows: Cow[],
+      atY: number,
+    ): { x: number; y: number; w: number; h: number } => {
       if (cows.length === 0) return { x: 0, y: 0, w: 0, h: 0 };
-      const total = cows.reduce((s, c) => s + (COW_SELL_PRICES[c.type.rarity] ?? 10), 0);
-      const bW = Math.min(PW - 40, 230), bH = 30;
-      const bX = PX + (PW - bW) / 2, bY = atY + 7;
+      const total = cows.reduce(
+        (s, c) => s + (COW_SELL_PRICES[c.type.rarity] ?? 10),
+        0,
+      );
+      const bW = Math.min(PW - 40, 230),
+        bH = 30;
+      const bX = PX + (PW - bW) / 2,
+        bY = atY + 7;
       this.drawPixelBtn(bX, bY, bW, bH, "normal");
-      ctx.fillStyle = "#FFD700"; ctx.font = "bold 12px sans-serif";
-      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillStyle = "#FFD700";
+      ctx.font = "bold 12px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
       ctx.fillText(`Vender Tudo  💰 ${total}`, bX + bW / 2, bY + bH / 2);
       ctx.textBaseline = "alphabetic";
       return { x: bX, y: bY, w: bW, h: bH };
@@ -3496,14 +4143,17 @@ export class Game {
       let cy = contentY + 6;
 
       // Sub-header: Rebanho
-      ctx.textAlign = "left"; ctx.font = "bold 11px sans-serif";
+      ctx.textAlign = "left";
+      ctx.font = "bold 11px sans-serif";
       ctx.fillStyle = "#C8A870";
       ctx.fillText("🐄 Rebanho", PX + 12, cy + 13);
       cy += 20;
 
       const herdVisible = herd.slice(0, SELL_MAX);
       if (herdVisible.length === 0) {
-        ctx.font = "11px sans-serif"; ctx.fillStyle = "#7a6040"; ctx.textAlign = "center";
+        ctx.font = "11px sans-serif";
+        ctx.fillStyle = "#7a6040";
+        ctx.textAlign = "center";
         ctx.fillText("Rebanho vazio", PX + PW / 2, cy + ROW_H / 2 + 4);
         cy += ROW_H;
       } else {
@@ -3512,7 +4162,9 @@ export class Game {
           cy += ROW_H;
         }
         if (herd.length > SELL_MAX) {
-          ctx.font = "10px sans-serif"; ctx.fillStyle = "#C8A870"; ctx.textAlign = "center";
+          ctx.font = "10px sans-serif";
+          ctx.fillStyle = "#C8A870";
+          ctx.textAlign = "center";
           ctx.fillText(`+${herd.length - SELL_MAX} mais`, PX + PW / 2, cy - 2);
         }
       }
@@ -3521,19 +4173,26 @@ export class Game {
 
       // Divider
       cy += 8;
-      ctx.strokeStyle = "rgba(200,160,80,0.3)"; ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(PX + 16, cy); ctx.lineTo(PX + PW - 16, cy); ctx.stroke();
+      ctx.strokeStyle = "rgba(200,160,80,0.3)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(PX + 16, cy);
+      ctx.lineTo(PX + PW - 16, cy);
+      ctx.stroke();
       cy += 4;
 
       // Sub-header: Curral
-      ctx.textAlign = "left"; ctx.font = "bold 11px sans-serif";
+      ctx.textAlign = "left";
+      ctx.font = "bold 11px sans-serif";
       ctx.fillStyle = "#C8A870";
       ctx.fillText("🏠 Curral", PX + 12, cy + 13);
       cy += 20;
 
       const basedVisible = based.slice(0, SELL_MAX);
       if (basedVisible.length === 0) {
-        ctx.font = "11px sans-serif"; ctx.fillStyle = "#7a6040"; ctx.textAlign = "center";
+        ctx.font = "11px sans-serif";
+        ctx.fillStyle = "#7a6040";
+        ctx.textAlign = "center";
         ctx.fillText("Curral vazio", PX + PW / 2, cy + ROW_H / 2 + 4);
         cy += ROW_H;
       } else {
@@ -3542,13 +4201,15 @@ export class Game {
           cy += ROW_H;
         }
         if (based.length > SELL_MAX) {
-          ctx.font = "10px sans-serif"; ctx.fillStyle = "#C8A870"; ctx.textAlign = "center";
+          ctx.font = "10px sans-serif";
+          ctx.fillStyle = "#C8A870";
+          ctx.textAlign = "center";
           ctx.fillText(`+${based.length - SELL_MAX} mais`, PX + PW / 2, cy - 2);
         }
       }
       this.shopSellAllBasedBtn = drawSellAllBtn(based, cy);
 
-    // ── Buy tab ───────────────────────────────────────────────────────────────
+      // ── Buy tab ───────────────────────────────────────────────────────────────
     } else {
       this.shopBuyButtons = [];
       let cy = contentY + 8;
@@ -3565,16 +4226,20 @@ export class Game {
         ctx.fillRect(PX + 6, cy, PW - 12, itemH - 2);
 
         // Icon
-        ctx.font = "28px sans-serif"; ctx.textAlign = "center";
+        ctx.font = "28px sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillStyle = "#FFE0A0";
         ctx.fillText(item.icon, PX + 28, cy + 36);
 
         // Name
-        ctx.textAlign = "left"; ctx.font = "bold 12px sans-serif";
+        ctx.textAlign = "left";
+        ctx.font = "bold 12px sans-serif";
         ctx.fillStyle = "#FFE0A0";
         ctx.fillText(item.name, PX + 50, cy + 18);
 
         // Description
-        ctx.font = "10px sans-serif"; ctx.fillStyle = "#C8A870";
+        ctx.font = "10px sans-serif";
+        ctx.fillStyle = "#C8A870";
         ctx.fillText(item.description, PX + 50, cy + 32);
 
         // Level pips
@@ -3584,26 +4249,40 @@ export class Game {
           ctx.beginPath();
           ctx.arc(PX + 52 + i * 14, cy + 48, 5, 0, Math.PI * 2);
           ctx.fill();
-          ctx.strokeStyle = "#9b7e57"; ctx.lineWidth = 1; ctx.stroke();
+          ctx.strokeStyle = "#9b7e57";
+          ctx.lineWidth = 1;
+          ctx.stroke();
         }
-        ctx.font = "10px sans-serif"; ctx.fillStyle = "#C8A870"; ctx.textAlign = "left";
-        ctx.fillText(`Nível ${level}/${item.maxLevel}`, PX + 52 + item.maxLevel * 14 + 4, cy + 52);
+        ctx.font = "10px sans-serif";
+        ctx.fillStyle = "#C8A870";
+        ctx.textAlign = "left";
+        ctx.fillText(
+          `Nível ${level}/${item.maxLevel}`,
+          PX + 52 + item.maxLevel * 14 + 4,
+          cy + 52,
+        );
 
         // Buy button
-        const bW = 72, bH = 28;
-        const bX = PX + PW - bW - 12, bY = cy + (itemH - bH) / 2;
+        const bW = 72,
+          bH = 28;
+        const bX = PX + PW - bW - 12,
+          bY = cy + (itemH - bH) / 2;
         if (maxed) {
           this.drawPixelBtn(bX, bY, bW, bH, "pressed");
-          ctx.fillStyle = "#7a6040"; ctx.font = "bold 10px sans-serif";
-          ctx.textAlign = "center"; ctx.textBaseline = "middle";
+          ctx.fillStyle = "#7a6040";
+          ctx.font = "bold 10px sans-serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
           ctx.fillText("Máximo", bX + bW / 2, bY + bH / 2);
         } else {
           this.drawPixelBtn(bX, bY, bW, bH, canAfford ? "normal" : "pressed");
           ctx.fillStyle = canAfford ? "#FFD700" : "#7a6040";
           ctx.font = "bold 10px sans-serif";
-          ctx.textAlign = "center"; ctx.textBaseline = "middle";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
           ctx.fillText(`💰 ${price}`, bX + bW / 2, bY + bH / 2);
-          if (canAfford) this.shopBuyButtons.push({ item, x: bX, y: bY, w: bW, h: bH });
+          if (canAfford)
+            this.shopBuyButtons.push({ item, x: bX, y: bY, w: bW, h: bH });
         }
         ctx.textBaseline = "alphabetic";
 
@@ -3612,7 +4291,6 @@ export class Game {
     }
   }
 
-  // Draws a cow centered at (0,0) — used by book preview (call inside a scaled ctx.save/restore)
   private drawCowAt(x: number, y: number, t: CowType) {
     const { ctx } = this;
     const body = t.bodyColor,
