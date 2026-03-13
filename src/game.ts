@@ -856,11 +856,15 @@ export class Game {
       const totalMsgs = this.chatMessages.length;
       const slice = this.chatMessages.slice(
         Math.max(0, totalMsgs - MAX_VISIBLE - this.chatHistoryScroll),
-        Math.max(0, totalMsgs - MAX_VISIBLE - this.chatHistoryScroll) + MAX_VISIBLE
+        Math.max(0, totalMsgs - MAX_VISIBLE - this.chatHistoryScroll) +
+          MAX_VISIBLE,
       );
-      const panelH = Math.max(lineH + padV * 2, slice.length * lineH + padV * 2);
+      const panelH = Math.max(
+        lineH + padV * 2,
+        slice.length * lineH + padV * 2,
+      );
       const panelY = H - 195 - panelH;
-      
+
       if (x >= 6 && x <= 6 + PW && y >= panelY && y <= panelY + panelH) {
         this.touchScroll = {
           active: true,
@@ -1325,7 +1329,7 @@ export class Game {
     if (this.touchScroll.active && e.pointerId === this.touchScroll.touchId) {
       const deltaY = this.touchScroll.lastY - e.clientY;
       this.touchScroll.lastY = e.clientY;
-      
+
       if (this.touchScroll.target === "shop") {
         this.shopBuyScroll = Math.max(0, this.shopBuyScroll + deltaY);
       } else if (this.touchScroll.target === "inventory") {
@@ -1333,7 +1337,7 @@ export class Game {
       } else if (this.touchScroll.target === "chat") {
         this.chatHistoryScroll = Math.max(
           0,
-          this.chatHistoryScroll + Math.sign(deltaY)
+          this.chatHistoryScroll + Math.sign(deltaY),
         );
       }
       e.preventDefault();
