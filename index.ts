@@ -35,6 +35,15 @@ interface PlacedObjectDoc {
 }
 const placedObjects = db.collection<PlacedObjectDoc>("placedObjects");
 
+interface ChoppedTreeDoc {
+  _id: ObjectId;
+  col: number;
+  row: number;
+  choppedAt: Date;
+}
+const choppedTreesColl = db.collection<ChoppedTreeDoc>("choppedTrees");
+await choppedTreesColl.createIndex({ col: 1, row: 1 }, { unique: true });
+
 await users.createIndex(
   { username: 1 },
   { unique: true, collation: { locale: "en", strength: 2 } },
@@ -562,6 +571,14 @@ server = Bun.serve<WsData>({
       // Verificar novamente após segundo await
       if (activeWsByUserId.get(userId) !== ws) return;
 
+      const choppedTreeDocs = await choppedTreesColl
+        .find({})
+        .project({ col: 1, row: 1, choppedAt: 1 })
+        .toArray();
+
+      // Check again after await
+      if (activeWsByUserId.get(userId) !== ws) return;
+
       ws.send(
         JSON.stringify({
           type: "init",
@@ -590,6 +607,7 @@ server = Bun.serve<WsData>({
             col: o.col,
             row: o.row,
           })),
+          choppedTrees: choppedTreeDocs.map((t) => ({ col: t.col, row: t.row })),
         }),
       );
 
@@ -698,6 +716,33 @@ server = Bun.serve<WsData>({
               },
             },
           );
+        } else if (
+          u.type === "tree_chop" &&
+          typeof u.col === "number" &&
+          typeof u.row === "number"
+        ) {
+          const col = Math.floor(u.col);
+          const row = Math.floor(u.row);
+          if (col < 0 || row < 0 || col >= 80 || row >= 80) return;
+          try {
+            await choppedTreesColl.insertOne({
+              col,
+              row,
+              choppedAt: new Date(),
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            } as any);
+          } catch {
+            // duplicate key — already chopped, ignore
+            return;
+          }
+          server.publish(
+            "game",
+            JSON.stringify({ type: "tree_chop", col, row }),
+          );
+        } else if (
+          u.type === "tree_regrow" // clients don't send this, but ignore
+        ) {
+          // server-only
         } else if (u.type === "chat" && typeof u.text === "string") {
           const text = String(u.text).slice(0, 200).trim();
           if (text) {
@@ -758,5 +803,21 @@ server = Bun.serve<WsData>({
     },
   },
 });
+
+// Regrow trees every minute: remove chopped trees older than 1 hour
+setInterval(async () => {
+  const cutoff = new Date(Date.now() - 60 * 60 * 1000); // 1 hour ago
+  const expired = await choppedTreesColl
+    .find({ choppedAt: { $lt: cutoff } })
+    .toArray();
+  if (expired.length === 0) return;
+  await choppedTreesColl.deleteMany({ choppedAt: { $lt: cutoff } });
+  for (const tree of expired) {
+    server.publish(
+      "game",
+      JSON.stringify({ type: "tree_regrow", col: tree.col, row: tree.row }),
+    );
+  }
+}, 60_000);
 
 console.log(`🤠 Cowboy Game rodando em ${server.url}`);

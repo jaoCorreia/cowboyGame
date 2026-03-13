@@ -26,6 +26,18 @@ import {
   VENDOR_ROW,
   VENDOR_INTERACT_DIST,
   COW_SELL_PRICES,
+  TREE_CHOP_DIST,
+  WOOD_DROP_MIN,
+  WOOD_DROP_MAX,
+  WOOD_MAX_STACK,
+  TREE_REGROW_TIME,
+  STONE_HARVEST_DIST,
+  STONE_DROP_MIN,
+  STONE_DROP_MAX,
+  STONE_MAX_STACK,
+  CHOP_CLICKS_NEEDED,
+  CHOP_TIME_LIMIT,
+  MAX_INVENTORY_SLOTS,
 } from "./constants";
 
 function basedSlotPos(slot: number) {
@@ -289,6 +301,17 @@ export class Game {
   private capturedByType = new Map<string, number>();
   private coins = 0;
   private inventory = new Map<string, number>(); // itemId → level
+  private choppedTrees = new Map<string, number>(); // "col,row" → regrowth timer (secs)
+  private chopFlash = 0; // flash timer ao cortar
+  private chop = {
+    active: false,
+    col: 0,
+    row: 0,
+    clickCount: 0,
+    timeLeft: 0,
+    flashTimer: 0,
+  };
+  private benchCraftBtns: Array<{ id: string; x: number; y: number; w: number; h: number }> = [];
   private itemIcons = new Map<string, HTMLImageElement>(); // cache de imagens de itens
   private shopOpen = false;
   private vendorDialog: {
@@ -466,6 +489,7 @@ export class Game {
       trunkIcon: new Image(),
       moneyIcon: new Image(),
       benchIcon: new Image(),
+      axeIcon: new Image(),
     };
 
     this.icons.bookIcon.src = "/sprites/hud/icons/book_icon.png";
@@ -478,6 +502,7 @@ export class Game {
     this.icons.spaceKey.src = "/sprites/hud/icons/space_key_icon.png";
     this.icons.moneyIcon.src = "/sprites/hud/icons/money_icon.png";
     this.icons.benchIcon.src = "/sprites/itens/individual_workbanch.png";
+    this.icons.axeIcon.src = "/sprites/hud/icons/axe_icon.png";
 
     // Pre-load item icons that are image paths
     for (const item of SHOP_ITEMS) {
@@ -590,6 +615,23 @@ export class Game {
         },
         onObjectRemoved: (id) => {
           this.placedObjects = this.placedObjects.filter((o) => o.id !== id);
+        },
+        onChoppedTreesInit: (trees) => {
+          for (const { col, row } of trees) {
+            const key = `${col},${row}`;
+            this.choppedTrees.set(key, 0);
+            if (this.map[row]?.[col]) this.map[row]![col]!.decoration = "none";
+          }
+        },
+        onTreeChopped: ({ col, row }) => {
+          const key = `${col},${row}`;
+          this.choppedTrees.set(key, 0);
+          if (this.map[row]?.[col]) this.map[row]![col]!.decoration = "none";
+        },
+        onTreeRegrown: ({ col, row }) => {
+          const key = `${col},${row}`;
+          this.choppedTrees.delete(key);
+          if (this.map[row]?.[col]) this.map[row]![col]!.decoration = "tree";
         },
       });
 
@@ -1086,6 +1128,13 @@ export class Game {
         void this.pickupBench(this.activeBench!);
         return;
       }
+      // Craft buttons
+      for (const btn of this.benchCraftBtns) {
+        if (x >= btn.x && x <= btn.x + btn.w && y >= btn.y && y <= btn.y + btn.h) {
+          if (btn.id === "machado") this.craftMachado();
+          return;
+        }
+      }
       return; // swallow input while hub open
     }
 
@@ -1440,6 +1489,22 @@ export class Game {
       this.depositCows();
       return;
     }
+    // Cortar árvore próxima (requer machado)
+    if (this.chop.active && this.chop.clickCount < CHOP_CLICKS_NEEDED) {
+      this.chop.clickCount++;
+      this.chop.flashTimer = 0.1;
+      return;
+    }
+    const nearBoulder = this.nearestBoulder();
+    if (nearBoulder) {
+      this.harvestStone(nearBoulder.col, nearBoulder.row);
+      return;
+    }
+    const nearTree = this.nearestChoppableTree();
+    if (nearTree && this.hasMachado()) {
+      this.startChop(nearTree.col, nearTree.row);
+      return;
+    }
     const cow = this.nearestWanderingCow();
     if (
       cow &&
@@ -1544,8 +1609,8 @@ export class Game {
     this.updateStake(dt); // always runs (independent of lasso)
     const beingPulled = this.stake.phase === "pulling";
     if (!this.lasso.active) {
-      if (!beingPulled) this.updatePlayer(dt);
-      else this.updateStakePull(dt);
+      if (!beingPulled && !this.chop.active) this.updatePlayer(dt);
+      else if (beingPulled) this.updateStakePull(dt);
       this.updateCows(dt);
     } else {
       this.updateLasso(dt);
@@ -1623,6 +1688,11 @@ export class Game {
       }
       this.cowSpawnTimer = 45 + Math.random() * 30;
     }
+
+    // Regrowth de árvores cortadas (gerenciado pelo servidor)
+    if (this.chopFlash > 0) this.chopFlash = Math.max(0, this.chopFlash - dt);
+
+    this.updateChop(dt);
 
     // Autosave a cada 60 segundos
     this.saveTimer -= dt;
@@ -2295,6 +2365,112 @@ export class Game {
     return best;
   }
 
+  private nearestChoppableTree(): { col: number; row: number } | null {
+    const pc = this.player.col,
+      pr = this.player.row;
+    const r = Math.ceil(TREE_CHOP_DIST) + 1;
+    let best: { col: number; row: number } | null = null;
+    let bestDist = Infinity;
+    for (let dr = -r; dr <= r; dr++) {
+      for (let dc = -r; dc <= r; dc++) {
+        const c = Math.floor(pc) + dc;
+        const ro = Math.floor(pr) + dr;
+        if (c < 0 || ro < 0 || c >= MAP_COLS || ro >= MAP_ROWS) continue;
+        if (this.map[ro]![c]!.decoration !== "tree") continue;
+        const d = Math.hypot(pc - c, pr - ro);
+        if (d <= TREE_CHOP_DIST && d < bestDist) {
+          bestDist = d;
+          best = { col: c, row: ro };
+        }
+      }
+    }
+    return best;
+  }
+
+  /** Conta quantos slots de mochila estão ocupados (itens únicos) */
+  private inventorySlotCount(): number {
+    // Conta itens do shop + recursos (wood, stone)
+    let count = 0;
+    for (const [_id, qty] of this.inventory) {
+      if (qty > 0) count++;
+    }
+    return count;
+  }
+
+  /** Tenta adicionar um recurso ao inventário respeitando o limite de slots e stack */
+  private addResource(id: string, amount: number, maxStack: number): number {
+    const current = this.inventory.get(id) ?? 0;
+    if (current === 0 && this.inventorySlotCount() >= MAX_INVENTORY_SLOTS) return 0; // sem slot livre
+    const gained = Math.min(amount, maxStack - current);
+    if (gained > 0) this.inventory.set(id, current + gained);
+    return gained;
+  }
+
+  private nearestBoulder(): { col: number; row: number } | null {
+    const pc = this.player.col, pr = this.player.row;
+    const r = Math.ceil(STONE_HARVEST_DIST) + 1;
+    let best: { col: number; row: number } | null = null;
+    let bestDist = Infinity;
+    for (let dr = -r; dr <= r; dr++) {
+      for (let dc = -r; dc <= r; dc++) {
+        const c = Math.floor(pc) + dc;
+        const ro = Math.floor(pr) + dr;
+        if (c < 0 || ro < 0 || c >= MAP_COLS || ro >= MAP_ROWS) continue;
+        if (this.map[ro]![c]!.decoration !== "boulder") continue;
+        const d = Math.hypot(pc - c, pr - ro);
+        if (d <= STONE_HARVEST_DIST && d < bestDist) {
+          bestDist = d;
+          best = { col: c, row: ro };
+        }
+      }
+    }
+    return best;
+  }
+
+  private harvestStone(_col: number, _row: number) {
+    const drop = STONE_DROP_MIN + Math.floor(Math.random() * (STONE_DROP_MAX - STONE_DROP_MIN + 1));
+    this.addResource("stone", drop, STONE_MAX_STACK);
+    this.chopFlash = 0.2;
+  }
+
+  private startChop(col: number, row: number) {
+    this.chop = { active: true, col, row, clickCount: 0, timeLeft: CHOP_TIME_LIMIT, flashTimer: 0 };
+  }
+
+  private updateChop(dt: number) {
+    if (!this.chop.active) return;
+    this.chop.timeLeft -= dt;
+    if (this.chop.flashTimer > 0) this.chop.flashTimer -= dt;
+    if (this.chop.clickCount >= CHOP_CLICKS_NEEDED) {
+      // Sucesso
+      const drop = WOOD_DROP_MIN + Math.floor(Math.random() * (WOOD_DROP_MAX - WOOD_DROP_MIN + 1));
+      this.addResource("wood", drop, WOOD_MAX_STACK);
+      const { col, row } = this.chop;
+      this.map[row]![col]!.decoration = "none";
+      this.choppedTrees.set(`${col},${row}`, 0);
+      this.chopFlash = 0.3;
+      this.chop.active = false;
+      this.network?.sendTreeChop(col, row);
+    } else if (this.chop.timeLeft <= 0) {
+      // Falha
+      this.chop.active = false;
+    }
+  }
+
+  private hasMachado(): boolean {
+    return (this.inventory.get("machado") ?? 0) > 0;
+  }
+
+  private craftMachado() {
+    const stone = this.inventory.get("stone") ?? 0;
+    if (stone < 5 || this.coins < 50) return;
+    if (!this.hasMachado() && this.inventorySlotCount() >= MAX_INVENTORY_SLOTS) return;
+    this.inventory.set("stone", stone - 5);
+    if ((this.inventory.get("stone") ?? 0) === 0) this.inventory.delete("stone");
+    this.coins -= 50;
+    this.inventory.set("machado", 1);
+  }
+
   // ─── Coordinates ──────────────────────────────────────────────────────────
 
   private wrapTextLines(
@@ -2366,6 +2542,53 @@ export class Game {
     this.renderStake();
     this.renderBandits();
     this.renderNightOverlay();
+    // Flash verde ao cortar árvore
+    if (this.chopFlash > 0) {
+      const alpha = (this.chopFlash / 0.25) * 0.25;
+      this.ctx.fillStyle = `rgba(80,200,80,${alpha})`;
+      this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    }
+    // UI de corte (minigame)
+    if (this.chop.active) {
+      const { ctx, canvas: cv } = this;
+      const W = cv.width, H = cv.height;
+      const progress = this.chop.clickCount / CHOP_CLICKS_NEEDED;
+      const barW = Math.min(W - 80, 280);
+      const bx = W / 2 - barW / 2;
+      const by = H / 2 + 60;
+      // fundo
+      ctx.fillStyle = "rgba(0,0,0,0.6)";
+      ctx.fillRect(bx - 8, by - 28, barW + 16, 64);
+      ctx.strokeStyle = "#7a5c32";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(bx - 8, by - 28, barW + 16, 64);
+      // label
+      ctx.font = "bold 13px sans-serif";
+      ctx.fillStyle = "#FFE0A0";
+      ctx.textAlign = "center";
+      ctx.drawImage(this.icons.axeIcon, W / 2 - 80, by - 26, 18, 18);
+      ctx.fillText(`Cortando... ${this.chop.clickCount}/${CHOP_CLICKS_NEEDED}`, W / 2 + 2, by - 8);
+      // barra
+      ctx.fillStyle = "#2a1a08";
+      ctx.fillRect(bx, by, barW, 18);
+      const fillColor = progress > 0.7 ? "#4caf50" : progress > 0.4 ? "#ff9800" : "#f44336";
+      ctx.fillStyle = fillColor;
+      ctx.fillRect(bx, by, barW * progress, 18);
+      ctx.strokeStyle = "#7a5c32";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(bx, by, barW, 18);
+      // timer
+      const timerFrac = this.chop.timeLeft / CHOP_TIME_LIMIT;
+      ctx.fillStyle = timerFrac < 0.3 ? "#ff4444" : "#FFD700";
+      ctx.font = "bold 12px sans-serif";
+      ctx.fillText(`${this.chop.timeLeft.toFixed(1)}s`, W / 2, by + 34);
+      // flash click
+      if (this.chop.flashTimer > 0) {
+        const a = (this.chop.flashTimer / 0.1) * 0.15;
+        ctx.fillStyle = `rgba(255,200,80,${a})`;
+        ctx.fillRect(0, 0, W, H);
+      }
+    }
     if (this.bookOpen) this.renderBook();
     else this.renderUI();
     if (this.shopOpen) this.renderShop();
@@ -2792,6 +3015,24 @@ export class Game {
     }
   }
 
+  private drawStump(col: number, row: number) {
+    const { ctx } = this;
+    const { x, y } = this.isoToScreen(col, row);
+    // Tronco cortado
+    ctx.fillStyle = "#5a3010";
+    ctx.fillRect(x - 5, y - 9, 10, 8);
+    // Topo do toco (elipse mais clara com anéis)
+    ctx.fillStyle = "#8b5e30";
+    ctx.beginPath();
+    ctx.ellipse(x, y - 9, 5, 3, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "#6b4220";
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.ellipse(x, y - 9, 2.5, 1.5, 0, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
   private renderMap() {
     const { colMin, colMax, rowMin, rowMax } = this.visibleTileRange();
 
@@ -2906,6 +3147,20 @@ export class Game {
           });
         }
       }
+    }
+
+    // Stumps for chopped trees
+    for (const key of this.choppedTrees.keys()) {
+      const parts = key.split(",");
+      const c = Number(parts[0]),
+        ro = Number(parts[1]);
+      if (c < colMin || c > colMax || ro < rowMin || ro > rowMax) continue;
+      const col = c,
+        row = ro;
+      items.push({
+        depth: col + row,
+        draw: () => this.drawStump(col, row),
+      });
     }
 
     items.push({
@@ -4366,6 +4621,13 @@ export class Game {
     const ownedItems = SHOP_ITEMS.filter(
       (it) => (this.inventory.get(it.id) ?? 0) > 0,
     );
+    const resources: Array<{ id: string; name: string; icon: string; qty: number; max: number }> = [];
+    const woodQty = this.inventory.get("wood") ?? 0;
+    const stoneQty = this.inventory.get("stone") ?? 0;
+    const machadoQty = this.inventory.get("machado") ?? 0;
+    if (woodQty > 0) resources.push({ id: "wood", name: "Madeira", icon: "🪵", qty: woodQty, max: WOOD_MAX_STACK });
+    if (stoneQty > 0) resources.push({ id: "stone", name: "Pedra", icon: "🪨", qty: stoneQty, max: STONE_MAX_STACK });
+    if (machadoQty > 0) resources.push({ id: "machado", name: "Machado de Pedra", icon: "", qty: machadoQty, max: 1 });
     const PW = Math.min(W - 32, 400);
     const HEADER_H = 56;
     const btnW = 74;
@@ -4373,6 +4635,8 @@ export class Game {
 
     // Calcular altura dinâmica do conteúdo
     let totalContentH = 16;
+    // Resources section height
+    if (resources.length > 0) totalContentH += 16 + resources.length * 36;
     if (ownedItems.length > 0) {
       for (const item of ownedItems) {
         const descLines = this.wrapTextLines(
@@ -4434,6 +4698,47 @@ export class Game {
     } else if (this.tradeState === "result") {
       this.renderTradeResultView(PX, PY + HEADER_H, PW, PH - HEADER_H);
     } else {
+      // Recursos primeiro
+      let resourcesY = PY + HEADER_H + 8 - this.inventoryScroll;
+      if (resources.length > 0) {
+        const ctx2 = this.ctx;
+        ctx2.save();
+        ctx2.beginPath();
+        ctx2.rect(PX + 4, PY + HEADER_H, PW - 8, contentH);
+        ctx2.clip();
+        ctx2.font = "bold 11px sans-serif";
+        ctx2.fillStyle = "#C8A870";
+        ctx2.textAlign = "left";
+        ctx2.fillText("RECURSOS", PX + 14, resourcesY + 12);
+        resourcesY += 20;
+        for (const res of resources) {
+          ctx2.fillStyle = "rgba(255,255,255,0.05)";
+          ctx2.fillRect(PX + 8, resourcesY, PW - 16, 30);
+          ctx2.font = "14px sans-serif";
+          ctx2.fillStyle = "#FFE0A0";
+          ctx2.textAlign = "left";
+          if (res.id === "machado") {
+            ctx2.drawImage(this.icons.axeIcon, PX + 16, resourcesY + 6, 16, 16);
+            ctx2.fillText(`  ${res.name}`, PX + 32, resourcesY + 20);
+          } else {
+            ctx2.fillText(`${res.icon}  ${res.name}`, PX + 16, resourcesY + 20);
+          }
+          ctx2.textAlign = "right";
+          ctx2.fillStyle = "#FFD700";
+          ctx2.font = "bold 13px sans-serif";
+          const label = res.max === 1 ? "✓" : `${res.qty}/${res.max}`;
+          ctx2.fillText(label, PX + PW - 16, resourcesY + 20);
+          resourcesY += 36;
+        }
+        // slot count
+        const slotUsed = this.inventorySlotCount();
+        ctx2.font = "10px sans-serif";
+        ctx2.fillStyle = slotUsed >= MAX_INVENTORY_SLOTS ? "#ff8888" : "#888";
+        ctx2.textAlign = "right";
+        ctx2.fillText(`Mochila: ${slotUsed}/${MAX_INVENTORY_SLOTS} slots`, PX + PW - 14, resourcesY + 4);
+        resourcesY += 12;
+        ctx2.restore();
+      }
       this.renderInventoryItems(
         PX,
         PY + HEADER_H,
@@ -4441,6 +4746,7 @@ export class Game {
         contentH,
         ownedItems,
         totalContentH,
+        resources.length > 0 ? 16 + resources.length * 36 + 16 : 0,
       );
     }
   }
@@ -4452,13 +4758,14 @@ export class Game {
     PH: number,
     ownedItems: GameItem[],
     totalContentH: number,
+    resourceOffset = 0,
   ) {
     const { ctx } = this;
     this.inventoryDropBtns = [];
     this.inventoryTradeBtns = [];
     this.inventoryPlaceBtns = [];
     this.inventoryUseBtns = [];
-    if (ownedItems.length === 0) {
+    if (ownedItems.length === 0 && resourceOffset === 0) {
       ctx.font = "13px sans-serif";
       ctx.fillStyle = "#7a6040";
       ctx.textAlign = "center";
@@ -4469,6 +4776,7 @@ export class Game {
       );
       return;
     }
+    if (ownedItems.length === 0) return;
 
     const btnW = 74;
     const textMaxWidth = PW - 60 - (btnW + 6) * 2 - 16; // espaço para descrição
@@ -4483,7 +4791,7 @@ export class Game {
     ctx.rect(PX + 4, PY, PW - 8, PH);
     ctx.clip();
 
-    let cy = PY + 8 - this.inventoryScroll;
+    let cy = PY + 8 + resourceOffset - this.inventoryScroll;
 
     for (let i = 0; i < ownedItems.length; i++) {
       const item = ownedItems[i]!;
@@ -4889,17 +5197,11 @@ export class Game {
     let hint = "";
     const isMobile = W < 600;
     if (atVendor && !this.shopOpen)
-      hint = isMobile
-        ? "Botão: Abrir Loja!"
-        : "Pressione E / botão para abrir a LOJA!";
+      hint = isMobile ? "Botão: Abrir Loja!" : "Pressione E / botão para abrir a LOJA!";
     else if (atBase && hasHerd)
-      hint = isMobile
-        ? "Botão: Depositar na base!"
-        : "Pressione E / botão para DEPOSITAR na base!";
+      hint = isMobile ? "Botão: Depositar na base!" : "Pressione E / botão para DEPOSITAR na base!";
     else if (nearest && dist(this.player, nearest) <= CAPTURE_DIST)
-      hint = isMobile
-        ? "Botão: Laçar vaca!"
-        : "Pressione E / botão para LAÇAR a vaca!";
+      hint = isMobile ? "Botão: Laçar vaca!" : "Pressione E / botão para LAÇAR a vaca!";
 
     if (!hint) return;
 
@@ -5419,10 +5721,16 @@ export class Game {
     let btnState: "normal" | "active" | "pressed" = "normal";
     let icon = this.icons.spaceKey;
     let label = "E";
+    let iconEmoji = "";
 
     const atVendor = this.isAtVendor();
     const nearBench = this.nearestBench();
-    if (this.lasso.active && this.lasso.phase === "pulling") {
+    const nearTreeBtn = this.nearestChoppableTree();
+    const nearBoulderBtn = this.nearestBoulder();
+    if (this.chop.active) {
+      btnState = this.chop.flashTimer > 0 ? "pressed" : "active";
+      icon = this.icons.axeIcon;
+    } else if (this.lasso.active && this.lasso.phase === "pulling") {
       btnState = this.lasso.flashTimer > 0 ? "pressed" : "active";
       icon = this.icons.pull;
     } else if (nearBench && !this.benchHubOpen) {
@@ -5434,12 +5742,26 @@ export class Game {
     } else if (atBase && hasHerd) {
       btnState = "active";
       icon = this.icons.base;
+    } else if (nearBoulderBtn) {
+      btnState = "active";
+      iconEmoji = "🪨";
+    } else if (nearTreeBtn) {
+      btnState = "active";
+      icon = this.icons.axeIcon;
     } else if (inRange) {
       btnState = "active";
       icon = this.icons.cowboy;
     }
     this.drawPixelBtn(ax - 30, ay - 30, 60, 60, btnState);
-    ctx.drawImage(icon, ax - 16, ay - 16, 32, 32);
+    if (iconEmoji) {
+      ctx.font = "26px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(iconEmoji, ax, ay);
+      ctx.textBaseline = "alphabetic";
+    } else {
+      ctx.drawImage(icon, ax - 16, ay - 16, 32, 32);
+    }
 
     // ── Stake button (above action button) ────────────────────────────────────
     const stakeX = W - 80,
@@ -6155,14 +6477,22 @@ export class Game {
 
   private renderBenchHub() {
     const { ctx, canvas } = this;
-    const W = canvas.width,
-      H = canvas.height;
+    const W = canvas.width, H = canvas.height;
     const bench = this.activeBench!;
     const isComm = bench.type === "bancada_comunitaria";
     const isOwner = bench.owner === this.myName;
 
+    // Receitas disponíveis
+    interface Recipe { id: string; name: string; icon: string; desc: string; stone: number; coins: number; }
+    const recipes: Recipe[] = [
+      { id: "machado", name: "Machado de Pedra", icon: "🪓", desc: "Necessário para cortar árvores", stone: 5, coins: 50 },
+    ];
+
+    const RECIPE_H = 68;
     const PW = Math.min(W - 32, 380);
-    const PH = 260;
+    const HEADER_H = 66;
+    const pickupH = isOwner ? 46 : 0;
+    const PH = Math.min(H - 40, HEADER_H + recipes.length * RECIPE_H + 20 + pickupH);
     const PX = (W - PW) / 2;
     const PY = (H - PH) / 2;
 
@@ -6186,19 +6516,78 @@ export class Game {
     ctx.strokeStyle = "rgba(200,160,80,0.4)";
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(PX + 10, PY + 58);
-    ctx.lineTo(PX + PW - 10, PY + 58);
+    ctx.moveTo(PX + 10, PY + HEADER_H - 4);
+    ctx.lineTo(PX + PW - 10, PY + HEADER_H - 4);
     ctx.stroke();
 
-    // Conteúdo (crafting — a ser implementado)
-    ctx.font = "12px sans-serif";
-    ctx.fillStyle = "#C8A870";
-    ctx.textAlign = "center";
-    ctx.fillText("Receitas de criação em breve...", PX + PW / 2, PY + 120);
+    // Receitas
+    this.benchCraftBtns = [];
+    let ry = PY + HEADER_H;
+    const stone = this.inventory.get("stone") ?? 0;
+    const machado = this.inventory.get("machado") ?? 0;
+
+    for (const recipe of recipes) {
+      const canCraft = stone >= recipe.stone && this.coins >= recipe.coins && machado === 0;
+      const alreadyHas = recipe.id === "machado" && machado > 0;
+
+      // Recipe card background
+      ctx.fillStyle = "rgba(255,255,255,0.04)";
+      ctx.fillRect(PX + 8, ry + 4, PW - 16, RECIPE_H - 8);
+      ctx.strokeStyle = "rgba(200,160,80,0.2)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(PX + 8, ry + 4, PW - 16, RECIPE_H - 8);
+
+      // Icon + name
+      ctx.drawImage(this.icons.axeIcon, PX + 14, ry + 10, 18, 18);
+      ctx.font = "bold 14px sans-serif";
+      ctx.fillStyle = "#FFE0A0";
+      ctx.textAlign = "left";
+      ctx.fillText(recipe.name, PX + 38, ry + 24);
+
+      // Description
+      ctx.font = "10px sans-serif";
+      ctx.fillStyle = "#C8A870";
+      ctx.fillText(recipe.desc, PX + 16, ry + 38);
+
+      // Ingredients
+      ctx.font = "11px sans-serif";
+      const stoneOk = stone >= recipe.stone;
+      const coinsOk = this.coins >= recipe.coins;
+      ctx.fillStyle = stoneOk ? "#90ee90" : "#ff8888";
+      ctx.fillText(`🪨 ${stone}/${recipe.stone}`, PX + 16, ry + 54);
+      ctx.fillStyle = coinsOk ? "#90ee90" : "#ff8888";
+      ctx.fillText(`💰 ${this.coins}/${recipe.coins}`, PX + 80, ry + 54);
+
+      // Craft button
+      const btnW = 80, btnH = 26;
+      const btnX = PX + PW - 16 - btnW;
+      const btnY = ry + (RECIPE_H - btnH) / 2;
+
+      if (alreadyHas) {
+        ctx.fillStyle = "rgba(100,100,100,0.5)";
+        ctx.fillRect(btnX, btnY, btnW, btnH);
+        ctx.font = "bold 10px sans-serif";
+        ctx.fillStyle = "#888";
+        ctx.textAlign = "center";
+        ctx.fillText("✓ Tem", btnX + btnW / 2, btnY + btnH / 2 + 4);
+      } else {
+        this.drawPixelBtn(btnX, btnY, btnW, btnH, "normal");
+        ctx.font = `bold 11px sans-serif`;
+        ctx.fillStyle = canCraft ? "#FFD700" : "#888";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(canCraft ? "✦ Criar" : "🔒 Criar", btnX + btnW / 2, btnY + btnH / 2);
+        ctx.textBaseline = "alphabetic";
+        if (canCraft) {
+          this.benchCraftBtns.push({ id: recipe.id, x: btnX, y: btnY, w: btnW, h: btnH });
+        }
+      }
+
+      ry += RECIPE_H;
+    }
 
     // Botão fechar
-    const closeCX = PX + PW - 18,
-      closeCY = PY + 18;
+    const closeCX = PX + PW - 18, closeCY = PY + 18;
     ctx.fillStyle = "#9b3a18";
     ctx.beginPath();
     ctx.arc(closeCX, closeCY, 12, 0, Math.PI * 2);
@@ -6216,10 +6605,9 @@ export class Game {
 
     // Botão recolher (só o dono)
     if (isOwner) {
-      const bW = 140,
-        bH = 30;
+      const bW = 140, bH = 30;
       const bX = PX + PW / 2 - bW / 2;
-      const bY = PY + PH - 50;
+      const bY = PY + PH - 44;
       this.drawPixelBtn(bX, bY, bW, bH, "normal");
       ctx.fillStyle = "#FF9980";
       ctx.font = "bold 11px sans-serif";
