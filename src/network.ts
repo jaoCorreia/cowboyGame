@@ -65,6 +65,9 @@ type Callbacks = {
   onTradeDeclined?(fromId: string): void;
   onObjectPlaced?(obj: PlacedObject): void;
   onObjectRemoved?(id: string): void;
+  onTreeChopped?(pos: { col: number; row: number }): void;
+  onTreeRegrown?(pos: { col: number; row: number }): void;
+  onChoppedTreesInit?(trees: Array<{ col: number; row: number }>): void;
 };
 
 export class Network {
@@ -101,6 +104,9 @@ export class Network {
                   row: b.row,
                 });
               }
+            }
+            if (msg.choppedTrees && callbacks.onChoppedTreesInit) {
+              callbacks.onChoppedTreesInit(msg.choppedTrees);
             }
             break;
           case "join":
@@ -157,6 +163,12 @@ export class Network {
             break;
           case "object_removed":
             callbacks.onObjectRemoved?.(msg.id);
+            break;
+          case "tree_chop":
+            callbacks.onTreeChopped?.({ col: msg.col, row: msg.row });
+            break;
+          case "tree_regrow":
+            callbacks.onTreeRegrown?.({ col: msg.col, row: msg.row });
             break;
         }
       } catch {
@@ -241,5 +253,10 @@ export class Network {
   sendTradeDecline(fromId: string) {
     if (!this.ready || !this.ws) return;
     this.ws.send(JSON.stringify({ type: "trade_decline", fromId }));
+  }
+
+  sendTreeChop(col: number, row: number) {
+    if (!this.ready || !this.ws) return;
+    this.ws.send(JSON.stringify({ type: "tree_chop", col, row }));
   }
 }

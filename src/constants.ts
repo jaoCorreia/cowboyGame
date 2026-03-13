@@ -43,6 +43,21 @@ export const COW_SELL_PRICES: Record<string, number> = {
   lendaria:   500,
 };
 
+// ─── Sistema de madeira ────────────────────────────────────────────────────────
+export const TREE_CHOP_DIST = 2.5;    // tiles máximos para cortar
+export const WOOD_DROP_MIN = 6;
+export const WOOD_DROP_MAX = 10;
+export const WOOD_MAX_STACK = 30;     // máximo por pack
+export const TREE_REGROW_TIME = 75;   // segundos até a árvore crescer de volta
+
+export const STONE_HARVEST_DIST = 2.5;
+export const STONE_DROP_MIN = 3;
+export const STONE_DROP_MAX = 5;
+export const STONE_MAX_STACK = 20;
+export const CHOP_CLICKS_NEEDED = 8;
+export const CHOP_TIME_LIMIT = 4;
+export const MAX_INVENTORY_SLOTS = 10; // total resource+item slots na mochila
+
 export const RARITY_COLORS: Record<string, string> = {
   comum:      '#9e9e9e',
   incomum:    '#4caf50',
