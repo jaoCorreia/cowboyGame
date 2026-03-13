@@ -8,6 +8,8 @@ export interface RemotePlayer {
   color: string;
   name: string;
   herdCount: number;
+  lastMessage?: string;
+  lastMessageTime?: number;
 }
 
 export interface ChatMessage {
@@ -46,7 +48,12 @@ type MoveUpdate = Pick<
 >;
 
 type Callbacks = {
-  onInit(myId: string, myColor: string, myName: string, existing: RemotePlayer[]): void;
+  onInit(
+    myId: string,
+    myColor: string,
+    myName: string,
+    existing: RemotePlayer[],
+  ): void;
   onJoin(player: RemotePlayer): void;
   onMove(update: MoveUpdate): void;
   onLeave(id: string): void;
@@ -70,7 +77,9 @@ export class Network {
       `${proto}://${location.host}/ws?token=${encodeURIComponent(token)}`,
     );
 
-    this.ws.onopen = () => { this.ready = true; };
+    this.ws.onopen = () => {
+      this.ready = true;
+    };
 
     this.ws.onmessage = (e) => {
       try {
@@ -83,38 +92,106 @@ export class Network {
             }
             if (msg.communityBenches && callbacks.onObjectPlaced) {
               for (const b of msg.communityBenches) {
-                callbacks.onObjectPlaced({ id: b.id, type: b.objectType, owner: b.owner, ownerColor: b.ownerColor, col: b.col, row: b.row });
+                callbacks.onObjectPlaced({
+                  id: b.id,
+                  type: b.objectType,
+                  owner: b.owner,
+                  ownerColor: b.ownerColor,
+                  col: b.col,
+                  row: b.row,
+                });
               }
             }
             break;
-          case "join":    callbacks.onJoin(msg.player); break;
-          case "move":    callbacks.onMove(msg); break;
-          case "leave":   callbacks.onLeave(msg.id); break;
-          case "chat":    callbacks.onChat?.({ id: msg.id, name: msg.name, color: msg.color, text: msg.text }); break;
-          case "cow_based": callbacks.onCowBased?.({ id: msg.id, color: msg.color, cows: msg.cows }); break;
-          case "kicked":  callbacks.onKicked?.(); break;
-          case "trade_offer":
-            callbacks.onTradeOffer?.({ fromId: msg.fromId, fromName: msg.fromName, fromColor: msg.fromColor, itemId: msg.itemId, level: msg.level });
+          case "join":
+            callbacks.onJoin(msg.player);
             break;
-          case "trade_accepted": callbacks.onTradeAccepted?.(msg.fromId); break;
-          case "trade_declined": callbacks.onTradeDeclined?.(msg.fromId); break;
+          case "move":
+            callbacks.onMove(msg);
+            break;
+          case "leave":
+            callbacks.onLeave(msg.id);
+            break;
+          case "chat":
+            callbacks.onChat?.({
+              id: msg.id,
+              name: msg.name,
+              color: msg.color,
+              text: msg.text,
+            });
+            break;
+          case "cow_based":
+            callbacks.onCowBased?.({
+              id: msg.id,
+              color: msg.color,
+              cows: msg.cows,
+            });
+            break;
+          case "kicked":
+            callbacks.onKicked?.();
+            break;
+          case "trade_offer":
+            callbacks.onTradeOffer?.({
+              fromId: msg.fromId,
+              fromName: msg.fromName,
+              fromColor: msg.fromColor,
+              itemId: msg.itemId,
+              level: msg.level,
+            });
+            break;
+          case "trade_accepted":
+            callbacks.onTradeAccepted?.(msg.fromId);
+            break;
+          case "trade_declined":
+            callbacks.onTradeDeclined?.(msg.fromId);
+            break;
           case "object_placed":
-            callbacks.onObjectPlaced?.({ id: msg.id, type: msg.objectType, owner: msg.owner, ownerColor: msg.ownerColor, col: msg.col, row: msg.row });
+            callbacks.onObjectPlaced?.({
+              id: msg.id,
+              type: msg.objectType,
+              owner: msg.owner,
+              ownerColor: msg.ownerColor,
+              col: msg.col,
+              row: msg.row,
+            });
             break;
           case "object_removed":
             callbacks.onObjectRemoved?.(msg.id);
             break;
         }
-      } catch { /* ignore malformed */ }
+      } catch {
+        /* ignore malformed */
+      }
     };
 
-    this.ws.onclose = () => { this.ready = false; };
-    this.ws.onerror = () => { this.ready = false; };
+    this.ws.onclose = () => {
+      this.ready = false;
+    };
+    this.ws.onerror = () => {
+      this.ready = false;
+    };
   }
 
-  sendMove(col: number, row: number, dirCol: number, dirRow: number, moving: boolean, herdCount: number) {
+  sendMove(
+    col: number,
+    row: number,
+    dirCol: number,
+    dirRow: number,
+    moving: boolean,
+    herdCount: number,
+  ) {
     if (!this.ready || !this.ws) return;
-    this.ws.send(JSON.stringify({ type: "move", col, row, dirCol, dirRow, moving, herdCount }));
+    this.ws.send(
+      JSON.stringify({
+        type: "move",
+        col,
+        row,
+        dirCol,
+        dirRow,
+        moving,
+        herdCount,
+      }),
+    );
   }
 
   sendCowBased(typeIds: string[]) {
@@ -127,9 +204,28 @@ export class Network {
     this.ws.send(JSON.stringify({ type: "chat", text }));
   }
 
-  sendSave(basedCount: number, discovered: string[], discoveredNPCs: string[], capturedByType: Record<string, number>, basedCowTypes: string[], coins: number, inventory: Record<string, number>) {
+  sendSave(
+    basedCount: number,
+    discovered: string[],
+    discoveredNPCs: string[],
+    capturedByType: Record<string, number>,
+    basedCowTypes: string[],
+    coins: number,
+    inventory: Record<string, number>,
+  ) {
     if (!this.ready || !this.ws) return;
-    this.ws.send(JSON.stringify({ type: "save", basedCount, discovered, discoveredNPCs, capturedByType, basedCowTypes, coins, inventory }));
+    this.ws.send(
+      JSON.stringify({
+        type: "save",
+        basedCount,
+        discovered,
+        discoveredNPCs,
+        capturedByType,
+        basedCowTypes,
+        coins,
+        inventory,
+      }),
+    );
   }
 
   sendTradeOffer(toId: string, itemId: string, level: number) {

@@ -16,6 +16,7 @@ export interface CowType {
   fearDistance: number;     // tiles — starts slowly backing away at this range (0 = not fearful)
   fearSpeed: number;        // tiles/sec when wary (scaled by proximity)
   nightOnly?: boolean;      // only spawns during nighttime
+  sprite?: string;          // path relativo a /sprites/ para substituir o canvas drawing
 }
 
 export const COW_TYPES: CowType[] = [
@@ -242,6 +243,35 @@ export const COW_TYPES: CowType[] = [
     renderStyle: 'glowing',
     description: 'Encarnação do folclore amazônico. É o espírito do Bumba Meu Boi em forma de lenda viva. Ao capturá-lo uma vez, dizem que ele sempre volta.',
     fearDistance: 12, fearSpeed: 4.5,
+  },
+  // ── Sprites customizados ──────────────────────────────────────────────────
+  {
+    id: 'bad_cow',
+    name: 'Vaca Malvada',
+    rarity: 'super_rara',
+    weight: 1.2,
+    clicksNeeded: 32,
+    bodyColor: '#3a0a0a',
+    spotColor: '#cc2020',
+    glowColor: 'rgba(200,20,20,0.4)',
+    renderStyle: 'glowing',
+    description: 'Olhar torvo, chifres afiados e temperamento explosivo. Ninguém sabe de onde veio, mas todo mundo sabe que não quer descobrir.',
+    fearDistance: 0, fearSpeed: 0,
+    sprite: 'cows/bad_cow.png',
+  },
+  {
+    id: 'glass_cow',
+    name: 'Vaca de Vidro',
+    rarity: 'rara',
+    weight: 2.5,
+    clicksNeeded: 20,
+    bodyColor: '#c8e8f8',
+    spotColor: '#80c0e0',
+    glowColor: 'rgba(150,220,255,0.3)',
+    renderStyle: 'translucent',
+    description: 'Feita de algum material transparente misterioso. Reflete a luz do sertão de um jeito que nenhuma outra vaca faz.',
+    fearDistance: 5, fearSpeed: 1.8,
+    sprite: 'cows/glass_cow.png',
   },
   {
     id: 'demonizada',

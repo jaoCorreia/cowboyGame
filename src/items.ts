@@ -6,6 +6,7 @@ export interface GameItem {
   basePrice: number; // price at level 0 → 1; multiplied by (level + 1)
   maxLevel: number;
   placeable?: boolean; // se true, level = quantidade; pode ser posicionado no mapa
+  consumable?: boolean; // se true, level = quantidade; uso único consome 1 unidade
 }
 
 export const SHOP_ITEMS: GameItem[] = [
@@ -20,7 +21,7 @@ export const SHOP_ITEMS: GameItem[] = [
   {
     id: "esporas",
     name: "Esporas de Ouro",
-    description: "+10% de velocidade",
+    description: "+5% de velocidade",
     icon: "⚡",
     basePrice: 80,
     maxLevel: 3,
@@ -51,10 +52,19 @@ export const SHOP_ITEMS: GameItem[] = [
     maxLevel: 1,
   },
   {
+    id: "leite_fluorescente",
+    name: "Leite de Vaca Fluorescente",
+    description: "Emite um brilho misterioso por 5 minutos. Ilumina sua volta na escuridão.",
+    icon: "🥛",
+    basePrice: 120,
+    maxLevel: 5,
+    consumable: true,
+  },
+  {
     id: "bancada_individual",
     name: "Bancada Individual",
     description: "Bancada de criação visível só para você. Posicione no mapa.",
-    icon: "🔨",
+    icon: "/sprites/itens/individual_workbanch.png",
     basePrice: 300,
     maxLevel: 10,
     placeable: true,
@@ -63,7 +73,7 @@ export const SHOP_ITEMS: GameItem[] = [
     id: "bancada_comunitaria",
     name: "Bancada Comunitária",
     description: "Bancada visível a todos os jogadores. Mais cara.",
-    icon: "🏗️",
+    icon: "/sprites/itens/workbanch_comunity.png",
     basePrice: 800,
     maxLevel: 10,
     placeable: true,
@@ -72,6 +82,6 @@ export const SHOP_ITEMS: GameItem[] = [
 
 /** Price to upgrade from currentLevel → currentLevel+1 */
 export function itemNextPrice(item: GameItem, currentLevel: number): number {
-  if (item.placeable) return item.basePrice; // preço fixo por unidade
+  if (item.placeable || item.consumable) return item.basePrice; // preço fixo por unidade
   return item.basePrice * (currentLevel + 1);
 }

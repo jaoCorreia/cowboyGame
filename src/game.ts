@@ -240,9 +240,19 @@ export class Game {
     w: number;
     h: number;
   }> = [];
+  private inventoryUseBtns: Array<{
+    item: GameItem;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+  }> = [];
+  private leiteTimer = 0; // segundos restantes do leite fluorescente
   private chatMessages: Array<ChatMessage & { time: number }> = [];
   private chatOpen = false;
   private chatInput?: HTMLInputElement;
+  private myLastMessage = "";
+  private myLastMessageTime = 0;
   private bookOpen = false;
   private bandits: Bandit[] = [];
   private nextBanditId = 0;
@@ -312,6 +322,8 @@ export class Game {
   // Inventário
   private inventoryOpen = false;
   private inventoryCloseBtn = { x: 0, y: 0, r: 0 };
+  private inventoryScroll = 0;
+  private inventoryContentArea = { x: 0, y: 0, w: 0, h: 0 };
   private inventoryDropBtns: Array<{
     item: GameItem;
     x: number;
@@ -444,7 +456,7 @@ export class Game {
     this.icons.bookIcon.src = "/sprites/hud/icons/book_icon.png";
     this.icons.stakeIcon.src = "/sprites/hud/icons/stake_icon.png";
     this.icons.eyeIcon.src = "/sprites/hud/icons/eye_icon.png";
-    this.icons.trunkIcon.src = "/sprites/hud/icons/trunk_icon.png";
+    this.icons.trunkIcon.src = "/sprites/hud/icons/backpack_icon.png";
     this.icons.pull.src = "/sprites/hud/icons/lasso_icon.png";
     this.icons.base.src = "/sprites/hud/icons/key_icon.png";
     this.icons.cowboy.src = "/sprites/hud/icons/lasso_icon.png";
@@ -515,6 +527,12 @@ export class Game {
         onChat: (msg) => {
           this.chatMessages.push({ ...msg, time: Date.now() });
           if (this.chatMessages.length > 50) this.chatMessages.shift();
+          // Atualiza a última mensagem do jogador para exibir acima da cabeça
+          const player = this.remotePlayers.get(msg.id);
+          if (player) {
+            player.lastMessage = msg.text;
+            player.lastMessageTime = Date.now();
+          }
         },
         onKicked: () => {
           localStorage.removeItem("cowboy_token");
@@ -623,7 +641,11 @@ export class Game {
       e.stopPropagation();
       if (e.key === "Enter") {
         const text = input.value.trim();
-        if (text) this.network?.sendChat(text);
+        if (text) {
+          this.network?.sendChat(text);
+          this.myLastMessage = text;
+          this.myLastMessageTime = Date.now();
+        }
         input.value = "";
       } else if (e.key === "Escape") {
         this.closeChatInput();
@@ -768,6 +790,18 @@ export class Game {
             e.clientY <= area.y + area.h
           ) {
             this.shopBuyScroll = Math.max(0, this.shopBuyScroll + e.deltaY);
+            e.preventDefault();
+          }
+        } else if (this.inventoryOpen && this.tradeState === "idle") {
+          // Scroll no inventário
+          const area = this.inventoryContentArea;
+          if (
+            e.clientX >= area.x &&
+            e.clientX <= area.x + area.w &&
+            e.clientY >= area.y &&
+            e.clientY <= area.y + area.h
+          ) {
+            this.inventoryScroll = Math.max(0, this.inventoryScroll + e.deltaY);
             e.preventDefault();
           }
         } else if (this.chatOpen) {
@@ -960,7 +994,13 @@ export class Game {
 
     // Bench collect button (só dono)
     const cb = this.benchCollectBtn;
-    if (cb.w > 0 && x >= cb.x && x <= cb.x + cb.w && y >= cb.y && y <= cb.y + cb.h) {
+    if (
+      cb.w > 0 &&
+      x >= cb.x &&
+      x <= cb.x + cb.w &&
+      y >= cb.y &&
+      y <= cb.y + cb.h
+    ) {
       const bench = this.nearestBench();
       if (bench) void this.pickupBench(bench);
       return;
@@ -968,13 +1008,22 @@ export class Game {
 
     // Bench hub interaction
     if (this.benchHubOpen) {
-      if (Math.hypot(x - this.benchHubCloseBtn.x, y - this.benchHubCloseBtn.y) < this.benchHubCloseBtn.r + 6) {
+      if (
+        Math.hypot(x - this.benchHubCloseBtn.x, y - this.benchHubCloseBtn.y) <
+        this.benchHubCloseBtn.r + 6
+      ) {
         this.benchHubOpen = false;
         this.activeBench = null;
         return;
       }
       const pb = this.benchPickupBtn;
-      if (pb.w > 0 && x >= pb.x && x <= pb.x + pb.w && y >= pb.y && y <= pb.y + pb.h) {
+      if (
+        pb.w > 0 &&
+        x >= pb.x &&
+        x <= pb.x + pb.w &&
+        y >= pb.y &&
+        y <= pb.y + pb.h
+      ) {
         void this.pickupBench(this.activeBench!);
         return;
       }
@@ -1087,6 +1136,17 @@ export class Game {
             y <= btn.y + btn.h
           ) {
             this.startPlacement(btn.item);
+            return;
+          }
+        }
+        for (const btn of this.inventoryUseBtns) {
+          if (
+            x >= btn.x &&
+            x <= btn.x + btn.w &&
+            y >= btn.y &&
+            y <= btn.y + btn.h
+          ) {
+            this.useConsumable(btn.item);
             return;
           }
         }
@@ -1471,6 +1531,9 @@ export class Game {
       this.saveTimer = 60;
       this.triggerSave();
     }
+    if (this.leiteTimer > 0) {
+      this.leiteTimer = Math.max(0, this.leiteTimer - dt);
+    }
   }
 
   private triggerSave() {
@@ -1809,7 +1872,7 @@ export class Game {
   // ─── Efeitos de itens ─────────────────────────────────────────────────────
 
   private get effectiveSpeed() {
-    return PLAYER_SPEED * (1 + (this.inventory.get("esporas") ?? 0) * 0.1);
+    return PLAYER_SPEED * (1 + (this.inventory.get("esporas") ?? 0) * 0.05);
   }
 
   private get effectiveCaptureRange() {
@@ -1978,12 +2041,18 @@ export class Game {
     // Verificar sobreposição com bancada existente (distância < 1 tile)
     const col = tileCol + 0.5;
     const row = tileRow + 0.5;
-    if (this.placedObjects.some((o) => Math.abs(o.col - col) < 1 && Math.abs(o.row - row) < 1))
+    if (
+      this.placedObjects.some(
+        (o) => Math.abs(o.col - col) < 1 && Math.abs(o.row - row) < 1,
+      )
+    )
       return false;
     // Bancada comunitária: máximo 1 por jogador
     if (
       this.placementMode === "bancada_comunitaria" &&
-      this.placedObjects.some((o) => o.type === "bancada_comunitaria" && o.owner === this.myName)
+      this.placedObjects.some(
+        (o) => o.type === "bancada_comunitaria" && o.owner === this.myName,
+      )
     )
       return false;
     return true;
@@ -1992,6 +2061,17 @@ export class Game {
   private startPlacement(item: GameItem) {
     this.placementMode = item.id;
     this.inventoryOpen = false;
+  }
+
+  private useConsumable(item: GameItem) {
+    const qty = this.inventory.get(item.id) ?? 0;
+    if (qty <= 0 || this.leiteTimer > 0) return;
+    if (item.id === "leite_fluorescente") {
+      this.leiteTimer = 5 * 60; // 5 minutos
+      const newQty = qty - 1;
+      if (newQty <= 0) this.inventory.delete(item.id);
+      else this.inventory.set(item.id, newQty);
+    }
   }
 
   private async placeObject(col: number, row: number) {
@@ -2838,26 +2918,51 @@ export class Game {
       : "itens/individual_workbanch.png";
     const sprite = sprites.get(spritePath);
     if (sprite) {
-      const sw = 64, sh = 64;
+      const sw = 64,
+        sh = 64;
       ctx.drawImage(sprite, x - sw / 2, y - sh + 8, sw, sh);
     } else {
       // Fallback canvas
-      const hw = 22, hh = 11, tableH = 16;
+      const hw = 22,
+        hh = 11,
+        tableH = 16;
       ctx.save();
       ctx.translate(x, y - 18);
       ctx.fillStyle = isComm ? "#7a4e28" : "#5a3818";
       ctx.beginPath();
-      ctx.moveTo(0, 0); ctx.lineTo(-hw, hh); ctx.lineTo(-hw, hh + tableH); ctx.lineTo(0, tableH); ctx.closePath(); ctx.fill();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(-hw, hh);
+      ctx.lineTo(-hw, hh + tableH);
+      ctx.lineTo(0, tableH);
+      ctx.closePath();
+      ctx.fill();
       ctx.fillStyle = isComm ? "#5a3818" : "#3e2810";
       ctx.beginPath();
-      ctx.moveTo(0, 0); ctx.lineTo(hw, hh); ctx.lineTo(hw, hh + tableH); ctx.lineTo(0, tableH); ctx.closePath(); ctx.fill();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(hw, hh);
+      ctx.lineTo(hw, hh + tableH);
+      ctx.lineTo(0, tableH);
+      ctx.closePath();
+      ctx.fill();
       ctx.fillStyle = isComm ? "#c4884f" : "#9a6a3a";
       ctx.beginPath();
-      ctx.moveTo(0, -hh); ctx.lineTo(hw, 0); ctx.lineTo(0, hh); ctx.lineTo(-hw, 0); ctx.closePath(); ctx.fill();
-      ctx.strokeStyle = "rgba(0,0,0,0.45)"; ctx.lineWidth = 1;
+      ctx.moveTo(0, -hh);
+      ctx.lineTo(hw, 0);
+      ctx.lineTo(0, hh);
+      ctx.lineTo(-hw, 0);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = "rgba(0,0,0,0.45)";
+      ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.moveTo(0, -hh); ctx.lineTo(hw, 0); ctx.lineTo(hw, hh + tableH);
-      ctx.lineTo(0, hh + tableH); ctx.lineTo(-hw, hh + tableH); ctx.lineTo(-hw, hh); ctx.lineTo(0, -hh); ctx.stroke();
+      ctx.moveTo(0, -hh);
+      ctx.lineTo(hw, 0);
+      ctx.lineTo(hw, hh + tableH);
+      ctx.lineTo(0, hh + tableH);
+      ctx.lineTo(-hw, hh + tableH);
+      ctx.lineTo(-hw, hh);
+      ctx.lineTo(0, -hh);
+      ctx.stroke();
       ctx.restore();
     }
 
@@ -2877,7 +2982,12 @@ export class Game {
     ctx.restore();
   }
 
-  private drawBenchPreview(col: number, row: number, type: string, valid: boolean) {
+  private drawBenchPreview(
+    col: number,
+    row: number,
+    type: string,
+    valid: boolean,
+  ) {
     const { ctx } = this;
     const { x, y } = this.isoToScreen(col, row);
     const isComm = type === "bancada_comunitaria";
@@ -2990,6 +3100,65 @@ export class Game {
     ctx.textBaseline = "top";
     ctx.fillText(rp.name, x, py - 71);
     ctx.textBaseline = "alphabetic";
+
+    // Balão de fala (se mensagem recente - últimos 5 segundos)
+    if (rp.lastMessage && rp.lastMessageTime) {
+      const elapsed = Date.now() - rp.lastMessageTime;
+      if (elapsed < 5000) {
+        const alpha = elapsed < 4000 ? 1 : 1 - (elapsed - 4000) / 1000;
+        ctx.globalAlpha = alpha;
+
+        // Truncar mensagem se muito longa
+        ctx.font = "10px sans-serif";
+        let displayText = rp.lastMessage;
+        const maxW = 120;
+        if (ctx.measureText(displayText).width > maxW) {
+          while (
+            ctx.measureText(displayText + "...").width > maxW &&
+            displayText.length > 0
+          ) {
+            displayText = displayText.slice(0, -1);
+          }
+          displayText += "...";
+        }
+
+        const msgW = ctx.measureText(displayText).width;
+        const bubbleW = msgW + 12;
+        const bubbleH = 18;
+        const bubbleX = x - bubbleW / 2;
+        const bubbleY = py - 94;
+
+        // Fundo do balão
+        ctx.fillStyle = "rgba(255,255,255,0.95)";
+        ctx.beginPath();
+        ctx.roundRect(bubbleX, bubbleY, bubbleW, bubbleH, 6);
+        ctx.fill();
+
+        // Pontinha do balão
+        ctx.beginPath();
+        ctx.moveTo(x - 5, bubbleY + bubbleH);
+        ctx.lineTo(x, bubbleY + bubbleH + 6);
+        ctx.lineTo(x + 5, bubbleY + bubbleH);
+        ctx.closePath();
+        ctx.fill();
+
+        // Borda do balão
+        ctx.strokeStyle = "rgba(0,0,0,0.2)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.roundRect(bubbleX, bubbleY, bubbleW, bubbleH, 6);
+        ctx.stroke();
+
+        // Texto
+        ctx.fillStyle = "#333";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(displayText, x, bubbleY + bubbleH / 2);
+        ctx.textBaseline = "alphabetic";
+
+        ctx.globalAlpha = 1;
+      }
+    }
   }
 
   // ─── Remote based cow ─────────────────────────────────────────────────────
@@ -3068,6 +3237,20 @@ export class Game {
     const { ctx } = this;
     const { x, y } = this.isoToScreen(this.player.col, this.player.row);
 
+    // ── Leite Fluorescente glow ───────────────────────────────────────────────
+    if (this.leiteTimer > 0) {
+      const pulse = 0.65 + 0.35 * Math.sin(this.time * 3.5);
+      const alpha = Math.min(1, this.leiteTimer / 5) * pulse;
+      const grad = ctx.createRadialGradient(x, y - 16, 8, x, y - 16, 72);
+      grad.addColorStop(0, `rgba(180,255,120,${alpha * 0.8})`);
+      grad.addColorStop(0.45, `rgba(100,220,60,${alpha * 0.4})`);
+      grad.addColorStop(1, `rgba(60,180,20,0)`);
+      ctx.beginPath();
+      ctx.ellipse(x, y - 16, 72, 72, 0, 0, Math.PI * 2);
+      ctx.fillStyle = grad;
+      ctx.fill();
+    }
+
     // ── Shadow ────────────────────────────────────────────────────────────────
     ctx.fillStyle = "rgba(0,0,0,0.25)";
     ctx.beginPath();
@@ -3111,6 +3294,65 @@ export class Game {
           ctx.stroke();
           ctx.setLineDash([]);
         }
+      }
+    }
+
+    // Balão de fala do jogador local (se mensagem recente - últimos 5 segundos)
+    if (this.myLastMessage && this.myLastMessageTime) {
+      const elapsed = Date.now() - this.myLastMessageTime;
+      if (elapsed < 5000) {
+        const alpha = elapsed < 4000 ? 1 : 1 - (elapsed - 4000) / 1000;
+        ctx.globalAlpha = alpha;
+
+        // Truncar mensagem se muito longa
+        ctx.font = "10px sans-serif";
+        let displayText = this.myLastMessage;
+        const maxW = 120;
+        if (ctx.measureText(displayText).width > maxW) {
+          while (
+            ctx.measureText(displayText + "...").width > maxW &&
+            displayText.length > 0
+          ) {
+            displayText = displayText.slice(0, -1);
+          }
+          displayText += "...";
+        }
+
+        const msgW = ctx.measureText(displayText).width;
+        const bubbleW = msgW + 12;
+        const bubbleH = 18;
+        const bubbleX = x - bubbleW / 2;
+        const bubbleY = y - 80;
+
+        // Fundo do balão
+        ctx.fillStyle = "rgba(255,255,255,0.95)";
+        ctx.beginPath();
+        ctx.roundRect(bubbleX, bubbleY, bubbleW, bubbleH, 6);
+        ctx.fill();
+
+        // Pontinha do balão
+        ctx.beginPath();
+        ctx.moveTo(x - 5, bubbleY + bubbleH);
+        ctx.lineTo(x, bubbleY + bubbleH + 6);
+        ctx.lineTo(x + 5, bubbleY + bubbleH);
+        ctx.closePath();
+        ctx.fill();
+
+        // Borda do balão
+        ctx.strokeStyle = "rgba(0,0,0,0.2)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.roundRect(bubbleX, bubbleY, bubbleW, bubbleH, 6);
+        ctx.stroke();
+
+        // Texto
+        ctx.fillStyle = "#333";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(displayText, x, bubbleY + bubbleH / 2);
+        ctx.textBaseline = "alphabetic";
+
+        ctx.globalAlpha = 1;
       }
     }
   }
@@ -3176,79 +3418,85 @@ export class Game {
       ctx.globalAlpha = 0.55 + Math.sin(this.time * 2 + cow.id) * 0.1;
     else ctx.globalAlpha = prevAlpha;
 
+    // Sprite customizado substitui o canvas drawing do corpo
+    const cowSprite = t.sprite ? sprites.get(t.sprite) : null;
+    const useSprite = !!cowSprite;
+
     const body = t.bodyColor;
     const spot = t.spotColor;
 
-    // Body
-    ctx.fillStyle = body;
-    ctx.beginPath();
-    ctx.roundRect(x - 16, cy - 20, 30, 16, 4);
-    ctx.fill();
-
-    // Stripes for 'striped'
-    if (t.renderStyle === "striped") {
-      ctx.fillStyle = spot;
-      for (let i = 0; i < 4; i++) {
-        ctx.fillRect(x - 14 + i * 7, cy - 20, 3, 16);
-      }
-    } else if (t.renderStyle === "cosmic") {
-      // Star dots
-      ctx.fillStyle = "#ffffff";
-      for (let i = 0; i < 8; i++) {
-        const sx =
-          x - 14 + Math.sin(i * 1.3 + this.time * 0.5 + cow.id) * 10 + 10;
-        const sy = cy - 14 + Math.cos(i * 1.7 + this.time * 0.3 + cow.id) * 5;
-        ctx.beginPath();
-        ctx.arc(sx, sy, 1.5, 0, Math.PI * 2);
-        ctx.fill();
-      }
+    if (useSprite) {
+      // Sprite customizado
+      const sw = 52,
+        sh = 52;
+      ctx.drawImage(cowSprite!, x - sw / 2, cy - sh + 4, sw, sh);
     } else {
-      // Normal spots
-      ctx.fillStyle = spot;
+      // Canvas drawing padrão
+      ctx.fillStyle = body;
       ctx.beginPath();
-      ctx.ellipse(x - 6, cy - 14, 5, 4, -0.3, 0, Math.PI * 2);
+      ctx.roundRect(x - 16, cy - 20, 30, 16, 4);
       ctx.fill();
-      ctx.beginPath();
-      ctx.ellipse(x + 5, cy - 11, 4, 5, 0.4, 0, Math.PI * 2);
-      ctx.fill();
-      if (t.secondaryColor) {
-        ctx.fillStyle = t.secondaryColor;
+
+      if (t.renderStyle === "striped") {
+        ctx.fillStyle = spot;
+        for (let i = 0; i < 4; i++) {
+          ctx.fillRect(x - 14 + i * 7, cy - 20, 3, 16);
+        }
+      } else if (t.renderStyle === "cosmic") {
+        ctx.fillStyle = "#ffffff";
+        for (let i = 0; i < 8; i++) {
+          const sx =
+            x - 14 + Math.sin(i * 1.3 + this.time * 0.5 + cow.id) * 10 + 10;
+          const sy = cy - 14 + Math.cos(i * 1.7 + this.time * 0.3 + cow.id) * 5;
+          ctx.beginPath();
+          ctx.arc(sx, sy, 1.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      } else {
+        ctx.fillStyle = spot;
         ctx.beginPath();
-        ctx.ellipse(x - 2, cy - 18, 4, 3, 0.2, 0, Math.PI * 2);
+        ctx.ellipse(x - 6, cy - 14, 5, 4, -0.3, 0, Math.PI * 2);
         ctx.fill();
+        ctx.beginPath();
+        ctx.ellipse(x + 5, cy - 11, 4, 5, 0.4, 0, Math.PI * 2);
+        ctx.fill();
+        if (t.secondaryColor) {
+          ctx.fillStyle = t.secondaryColor;
+          ctx.beginPath();
+          ctx.ellipse(x - 2, cy - 18, 4, 3, 0.2, 0, Math.PI * 2);
+          ctx.fill();
+        }
       }
+
+      // Head
+      ctx.fillStyle = body;
+      ctx.beginPath();
+      ctx.roundRect(x + 12, cy - 22, 14, 12, 3);
+      ctx.fill();
+      ctx.fillStyle = "#222";
+      ctx.fillRect(x + 21, cy - 20, 2, 2);
+      ctx.fillStyle = "#f4a0a0";
+      ctx.beginPath();
+      ctx.ellipse(x + 24, cy - 14, 3, 2, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#f4c0b0";
+      ctx.beginPath();
+      ctx.ellipse(x + 13, cy - 21, 3, 4, -0.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Legs
+      ctx.fillStyle = t.renderStyle === "cosmic" ? "#0a0820" : "#ddd";
+      for (const lx of [x - 12, x - 4, x + 4, x + 10])
+        ctx.fillRect(lx, cy - 4, 4, 8);
+
+      // Tail
+      ctx.strokeStyle = body;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(x - 16, cy - 14);
+      ctx.quadraticCurveTo(x - 24, cy - 10, x - 20, cy - 4);
+      ctx.stroke();
     }
-
-    // Head
-    ctx.fillStyle = body;
-    ctx.beginPath();
-    ctx.roundRect(x + 12, cy - 22, 14, 12, 3);
-    ctx.fill();
-
-    // Eye, nose, ear
-    ctx.fillStyle = "#222";
-    ctx.fillRect(x + 21, cy - 20, 2, 2);
-    ctx.fillStyle = "#f4a0a0";
-    ctx.beginPath();
-    ctx.ellipse(x + 24, cy - 14, 3, 2, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = "#f4c0b0";
-    ctx.beginPath();
-    ctx.ellipse(x + 13, cy - 21, 3, 4, -0.5, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Legs
-    ctx.fillStyle = t.renderStyle === "cosmic" ? "#0a0820" : "#ddd";
-    for (const lx of [x - 12, x - 4, x + 4, x + 10])
-      ctx.fillRect(lx, cy - 4, 4, 8);
-
-    // Tail
-    ctx.strokeStyle = body;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(x - 16, cy - 14);
-    ctx.quadraticCurveTo(x - 24, cy - 10, x - 20, cy - 4);
-    ctx.stroke();
 
     ctx.globalAlpha = prevAlpha;
 
@@ -3637,7 +3885,8 @@ export class Game {
       );
       const PW = 210;
       // Base: cabeçalho(30) + 3 stats(60) + período(20) + moedas(20) + padding(16) = 146
-      const PH = 146 + (ownedItems.length > 0 ? 34 : 0);
+      const PH =
+        146 + (ownedItems.length > 0 ? 34 : 0) + (this.leiteTimer > 0 ? 20 : 0);
       this.drawPanel(6, 6, PW, PH, 0);
 
       // Cabeçalho: cor + nome do jogador
@@ -3713,6 +3962,23 @@ export class Game {
       ctx.fillText("Moedas:", 34, ry);
       ctx.textAlign = "right";
       ctx.fillText(`${this.coins}`, PW - 10, ry);
+      ry += 20;
+
+      // Leite Fluorescente timer
+      if (this.leiteTimer > 0) {
+        const totalSecs = Math.ceil(this.leiteTimer);
+        const mins = Math.floor(totalSecs / 60);
+        const secs = totalSecs % 60;
+        const pulse = 0.7 + 0.3 * Math.sin(this.time * 3.5);
+        ctx.font = "bold 11px sans-serif";
+        ctx.textAlign = "left";
+        ctx.fillStyle = `rgba(140,255,100,${pulse})`;
+        ctx.fillText(
+          `✨ Leite: ${mins}m${secs < 10 ? "0" : ""}${secs}s`,
+          14,
+          ry,
+        );
+      }
 
       // Botão recolher
       this.drawPixelBtn(PW - 20, 9, 22, 22, "normal");
@@ -4001,11 +4267,29 @@ export class Game {
     const ownedItems = SHOP_ITEMS.filter(
       (it) => (this.inventory.get(it.id) ?? 0) > 0,
     );
-    const ROW_H = 72;
     const PW = Math.min(W - 32, 400);
     const HEADER_H = 56;
-    const contentH = ownedItems.length > 0 ? ownedItems.length * ROW_H : 60;
-    const PH = Math.min(H - 40, HEADER_H + contentH + 16);
+    const btnW = 74;
+    const textMaxWidth = PW - 60 - (btnW + 6) * 2 - 16;
+
+    // Calcular altura dinâmica do conteúdo
+    let totalContentH = 16;
+    if (ownedItems.length > 0) {
+      for (const item of ownedItems) {
+        const descLines = this.wrapTextLines(
+          item.description,
+          textMaxWidth,
+          "10px sans-serif",
+        );
+        totalContentH += 72 + (descLines.length - 1) * 12;
+      }
+    } else {
+      totalContentH = 60;
+    }
+
+    const MAX_VISIBLE_H = 420;
+    const contentH = Math.min(MAX_VISIBLE_H, totalContentH);
+    const PH = Math.min(H - 40, HEADER_H + contentH);
     const PX = (W - PW) / 2;
     const PY = (H - PH) / 2;
     ctx.fillStyle = "rgba(0,0,0,0.5)";
@@ -4014,7 +4298,8 @@ export class Game {
     ctx.textAlign = "center";
     ctx.font = "bold 16px sans-serif";
     ctx.fillStyle = "#FFD700";
-    ctx.fillText("🎒  Inventário", PX + PW / 2, PY + 26);
+    ctx.drawImage(this.icons.trunkIcon, PX + PW / 2 - 70, PY + 8, 20, 20);
+    ctx.fillText("Inventário", PX + PW / 2 - 2, PY + 26);
     const closeCX = PX + PW - 18,
       closeCY = PY + 18;
     this.inventoryCloseBtn = { x: closeCX, y: closeCY, r: 12 };
@@ -4037,6 +4322,10 @@ export class Game {
     ctx.moveTo(PX + 10, PY + HEADER_H);
     ctx.lineTo(PX + PW - 10, PY + HEADER_H);
     ctx.stroke();
+
+    // Guardar área de conteúdo para detectar scroll
+    this.inventoryContentArea = { x: PX, y: PY + HEADER_H, w: PW, h: contentH };
+
     if (this.tradeState === "incoming" && this.tradeIncoming) {
       this.renderTradeIncomingView(PX, PY + HEADER_H, PW, PH - HEADER_H);
     } else if (this.tradeState === "selecting") {
@@ -4050,8 +4339,9 @@ export class Game {
         PX,
         PY + HEADER_H,
         PW,
-        PH - HEADER_H,
+        contentH,
         ownedItems,
+        totalContentH,
       );
     }
   }
@@ -4062,11 +4352,13 @@ export class Game {
     PW: number,
     PH: number,
     ownedItems: GameItem[],
+    totalContentH: number,
   ) {
     const { ctx } = this;
     this.inventoryDropBtns = [];
     this.inventoryTradeBtns = [];
     this.inventoryPlaceBtns = [];
+    this.inventoryUseBtns = [];
     if (ownedItems.length === 0) {
       ctx.font = "13px sans-serif";
       ctx.fillStyle = "#7a6040";
@@ -4078,11 +4370,40 @@ export class Game {
       );
       return;
     }
-    const ROW_H = 72;
-    let cy = PY + 8;
+
+    const btnW = 74;
+    const textMaxWidth = PW - 60 - (btnW + 6) * 2 - 16; // espaço para descrição
+
+    // Limitar o scroll ao máximo
+    const maxScroll = Math.max(0, totalContentH - PH);
+    this.inventoryScroll = Math.min(this.inventoryScroll, maxScroll);
+
+    // Aplicar clipping na área de conteúdo
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(PX + 4, PY, PW - 8, PH);
+    ctx.clip();
+
+    let cy = PY + 8 - this.inventoryScroll;
+
     for (let i = 0; i < ownedItems.length; i++) {
       const item = ownedItems[i]!;
       const level = this.inventory.get(item.id) ?? 0;
+
+      // Calcular linhas da descrição
+      const descLines = this.wrapTextLines(
+        item.description,
+        textMaxWidth,
+        "10px sans-serif",
+      );
+      const ROW_H = 72 + (descLines.length - 1) * 12;
+
+      // Pular itens fora da área visível
+      if (cy + ROW_H < PY || cy > PY + PH) {
+        cy += ROW_H;
+        continue;
+      }
+
       if (i % 2 === 0) {
         ctx.fillStyle = "rgba(255,255,255,0.04)";
         ctx.fillRect(PX + 6, cy, PW - 12, ROW_H - 2);
@@ -4118,20 +4439,43 @@ export class Game {
       ctx.font = "bold 12px sans-serif";
       ctx.fillStyle = "#FFE0A0";
       ctx.fillText(item.name, PX + 52, cy + 18);
+
+      // Descrição (múltiplas linhas)
       ctx.font = "10px sans-serif";
       ctx.fillStyle = "#C8A870";
-      ctx.fillText(item.description, PX + 52, cy + 32);
-      if (item.placeable) {
-        // Itens placeáveis: mostrar quantidade em vez de dots de nível
+      let descY = cy + 32;
+      for (const line of descLines) {
+        ctx.fillText(line, PX + 52, descY);
+        descY += 12;
+      }
+
+      // Level pips ou quantidade (após a descrição)
+      const pipsY = cy + 32 + descLines.length * 12 + 4;
+      if (item.placeable || item.consumable) {
+        // Itens placeáveis/consumíveis: mostrar quantidade em vez de dots de nível
         ctx.font = "bold 11px sans-serif";
-        ctx.fillStyle = "#98FF98";
+        ctx.fillStyle = item.consumable ? "#A0FFCC" : "#98FF98";
         ctx.textAlign = "left";
-        ctx.fillText(`x${level} no inventário`, PX + 54, cy + 54);
+        ctx.fillText(`x${level} no inventário`, PX + 54, pipsY);
+        if (
+          item.consumable &&
+          this.leiteTimer > 0 &&
+          item.id === "leite_fluorescente"
+        ) {
+          ctx.fillStyle = "#FFD080";
+          const mins = Math.ceil(this.leiteTimer / 60);
+          const secs = Math.ceil(this.leiteTimer % 60);
+          ctx.fillText(
+            `✨ ativo: ${mins}m${secs < 10 ? "0" : ""}${secs}s`,
+            PX + 150,
+            pipsY,
+          );
+        }
       } else {
         for (let p = 0; p < item.maxLevel; p++) {
           ctx.fillStyle = p < level ? "#FFD700" : "#3a2208";
           ctx.beginPath();
-          ctx.arc(PX + 54 + p * 14, cy + 50, 5, 0, Math.PI * 2);
+          ctx.arc(PX + 54 + p * 14, pipsY - 4, 5, 0, Math.PI * 2);
           ctx.fill();
           ctx.strokeStyle = "#9b7e57";
           ctx.lineWidth = 1;
@@ -4143,47 +4487,102 @@ export class Game {
         ctx.fillText(
           `Lv ${level}/${item.maxLevel}`,
           PX + 54 + item.maxLevel * 14 + 4,
-          cy + 54,
+          pipsY,
         );
       }
-      const bH = 26,
-        bW = 74;
-      const dropX = PX + PW - (bW + 6) * 2 - 8,
+      const bH = 26;
+      const dropX = PX + PW - (btnW + 6) * 2 - 8,
         dropY = cy + (ROW_H - bH) / 2;
-      const tradeX = PX + PW - bW - 8,
+      const tradeX = PX + PW - btnW - 8,
         tradeY = dropY;
-      this.drawPixelBtn(dropX, dropY, bW, bH, "normal");
+      this.drawPixelBtn(dropX, dropY, btnW, bH, "normal");
       ctx.fillStyle = "#FF9980";
       ctx.font = "bold 10px sans-serif";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.fillText("🗑 Descartar", dropX + bW / 2, dropY + bH / 2);
+      ctx.fillText("🗑 Descartar", dropX + btnW / 2, dropY + bH / 2);
       if (item.placeable) {
-        this.drawPixelBtn(tradeX, tradeY, bW, bH, "normal");
+        this.drawPixelBtn(tradeX, tradeY, btnW, bH, "normal");
         ctx.fillStyle = "#98FF98";
-        ctx.fillText("📍 Posicionar", tradeX + bW / 2, tradeY + bH / 2);
-        this.inventoryPlaceBtns.push({
-          item,
-          x: tradeX,
-          y: tradeY,
-          w: bW,
-          h: bH,
-        });
+        ctx.fillText("📍 Posicionar", tradeX + btnW / 2, tradeY + bH / 2);
+        if (dropY + bH > PY && dropY < PY + PH) {
+          this.inventoryPlaceBtns.push({
+            item,
+            x: tradeX,
+            y: tradeY,
+            w: btnW,
+            h: bH,
+          });
+        }
+      } else if (item.consumable) {
+        const canUse = level > 0 && this.leiteTimer <= 0;
+        this.drawPixelBtn(
+          tradeX,
+          tradeY,
+          btnW,
+          bH,
+          canUse ? "normal" : "pressed",
+        );
+        ctx.fillStyle = canUse ? "#A0FFCC" : "#668866";
+        ctx.fillText(
+          this.leiteTimer > 0 ? "✨ Ativo" : "✨ Usar",
+          tradeX + btnW / 2,
+          tradeY + bH / 2,
+        );
+        if (canUse && dropY + bH > PY && dropY < PY + PH) {
+          this.inventoryUseBtns.push({
+            item,
+            x: tradeX,
+            y: tradeY,
+            w: btnW,
+            h: bH,
+          });
+        }
       } else {
-        this.drawPixelBtn(tradeX, tradeY, bW, bH, "normal");
+        this.drawPixelBtn(tradeX, tradeY, btnW, bH, "normal");
         ctx.fillStyle = "#FFD700";
-        ctx.fillText("↔ Trocar", tradeX + bW / 2, tradeY + bH / 2);
-        this.inventoryTradeBtns.push({
+        ctx.fillText("↔ Trocar", tradeX + btnW / 2, tradeY + bH / 2);
+        if (dropY + bH > PY && dropY < PY + PH) {
+          this.inventoryTradeBtns.push({
+            item,
+            x: tradeX,
+            y: tradeY,
+            w: btnW,
+            h: bH,
+          });
+        }
+      }
+      ctx.textBaseline = "alphabetic";
+      if (dropY + bH > PY && dropY < PY + PH) {
+        this.inventoryDropBtns.push({
           item,
-          x: tradeX,
-          y: tradeY,
-          w: bW,
+          x: dropX,
+          y: dropY,
+          w: btnW,
           h: bH,
         });
       }
-      ctx.textBaseline = "alphabetic";
-      this.inventoryDropBtns.push({ item, x: dropX, y: dropY, w: bW, h: bH });
       cy += ROW_H;
+    }
+
+    ctx.restore();
+
+    // Desenhar scrollbar se necessário
+    if (maxScroll > 0) {
+      const scrollBarH = PH - 8;
+      const thumbH = Math.max(30, (PH / totalContentH) * scrollBarH);
+      const thumbY =
+        PY + 4 + (this.inventoryScroll / maxScroll) * (scrollBarH - thumbH);
+
+      // Track
+      ctx.fillStyle = "rgba(0,0,0,0.2)";
+      ctx.fillRect(PX + PW - 10, PY + 4, 6, scrollBarH);
+
+      // Thumb
+      ctx.fillStyle = "rgba(200,160,80,0.6)";
+      ctx.beginPath();
+      ctx.roundRect(PX + PW - 10, thumbY, 6, thumbH, 3);
+      ctx.fill();
     }
   }
 
@@ -4562,15 +4961,14 @@ export class Game {
       }
     }
 
-    // Spawn timer — only in active periods and when no bandit already on map
+    // Spawn timer — only in active periods and when below max bandits
     if (
       this.BANDIT_ACTIVE_PERIODS.includes(period) &&
-      this.bandits.length === 0
+      this.bandits.length < 3
     ) {
       this.banditSpawnTimer -= dt;
       if (this.banditSpawnTimer <= 0) {
         this.spawnBandit();
-        // Respawn 2-3min after escape (random so it feels natural)
         this.banditSpawnTimer = 120 + Math.random() * 60;
       }
     }
@@ -5344,20 +5742,24 @@ export class Game {
       }
 
       if (owned) {
-        const badgeText = item.placeable
-          ? `x${level}`
-          : maxed
-            ? "MAX"
-            : `Nív. ${level}/${item.maxLevel}`;
+        const badgeText =
+          item.placeable || item.consumable
+            ? `x${level}`
+            : maxed
+              ? "MAX"
+              : `Nív. ${level}/${item.maxLevel}`;
         ctx.font = "bold 11px sans-serif";
         const bw = ctx.measureText(badgeText).width + 12;
         const bx = parchX + parchW - 28 - bw;
         ctx.fillStyle =
-          (maxed && !item.placeable ? "#FFD700" : "#c8a060") + "44";
+          (maxed && !item.placeable && !item.consumable
+            ? "#FFD700"
+            : "#c8a060") + "44";
         ctx.beginPath();
         ctx.roundRect(bx, iy + 10, bw, 18, 5);
         ctx.fill();
-        ctx.fillStyle = maxed && !item.placeable ? "#b08000" : "#6a4020";
+        ctx.fillStyle =
+          maxed && !item.placeable && !item.consumable ? "#b08000" : "#6a4020";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         ctx.fillText(badgeText, bx + bw / 2, iy + 19);
@@ -6149,12 +6551,14 @@ export class Game {
 
         // Level pips ou quantidade (para itens placeáveis)
         const pipsY = cy + 32 + descLines.length * 12 + 4;
-        if (item.placeable) {
+        if (item.placeable || item.consumable) {
           ctx.font = "bold 10px sans-serif";
           ctx.fillStyle = level > 0 ? "#98FF98" : "#C8A870";
           ctx.textAlign = "left";
           ctx.fillText(
-            level > 0 ? `x${level} em estoque` : "Nenhuma em estoque",
+            level > 0
+              ? `x${level}/${item.maxLevel} em estoque`
+              : `0/${item.maxLevel} em estoque`,
             PX + 62,
             pipsY + 4,
           );
@@ -6184,7 +6588,14 @@ export class Game {
           bH = 28;
         const bX = PX + PW - bW - 12,
           bY = cy + (itemH - bH) / 2;
-        if (maxed && !item.placeable) {
+        if (maxed && item.consumable) {
+          this.drawPixelBtn(bX, bY, bW, bH, "pressed");
+          ctx.fillStyle = "#7a6040";
+          ctx.font = "bold 10px sans-serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText("Cheio", bX + bW / 2, bY + bH / 2);
+        } else if (maxed && !item.placeable) {
           this.drawPixelBtn(bX, bY, bW, bH, "pressed");
           ctx.fillStyle = "#7a6040";
           ctx.font = "bold 10px sans-serif";
@@ -6245,6 +6656,12 @@ export class Game {
 
   private drawCowAt(x: number, y: number, t: CowType) {
     const { ctx } = this;
+    const cowSprite = t.sprite ? sprites.get(t.sprite) : null;
+    if (cowSprite) {
+      const s = 52;
+      ctx.drawImage(cowSprite, x - s / 2, y - s + 4, s, s);
+      return;
+    }
     const body = t.bodyColor,
       spot = t.spotColor;
     ctx.fillStyle = body;

@@ -547,6 +547,10 @@ server = Bun.serve<WsData>({
       const row = (await users.findOne({
         _id: new ObjectId(userId),
       })) as UserDoc | null;
+
+      // Se outro refresh chegou durante o await, abortar
+      if (activeWsByUserId.get(userId) !== ws) return;
+
       const savedTypeIds: string[] = row?.basedCows ?? [];
       const savedBasedPositions = savedTypeIds.map((_, i) => userSlotToPos(i));
 
@@ -554,6 +558,9 @@ server = Bun.serve<WsData>({
       const communityBenches = await placedObjects
         .find({ type: "bancada_comunitaria" })
         .toArray();
+
+      // Verificar novamente após segundo await
+      if (activeWsByUserId.get(userId) !== ws) return;
 
       ws.send(
         JSON.stringify({
