@@ -123,6 +123,14 @@ interface Joystick {
   dy: number;
 }
 
+interface TouchScroll {
+  active: boolean;
+  touchId: number;
+  startY: number;
+  lastY: number;
+  target: "shop" | "inventory" | "chat" | "book" | null;
+}
+
 type StakePhase = "idle" | "aiming" | "flying" | "anchored" | "pulling";
 interface StakeData {
   phase: StakePhase;
@@ -201,6 +209,13 @@ export class Game {
     startY: 0,
     dx: 0,
     dy: 0,
+  };
+  private touchScroll: TouchScroll = {
+    active: false,
+    touchId: -1,
+    startY: 0,
+    lastY: 0,
+    target: null,
   };
   private lastTime = 0;
   private time = 0;
@@ -833,6 +848,29 @@ export class Game {
 
     // Clicar em qualquer outro lugar do canvas fecha o chat
     if (this.chatOpen) {
+      // Verifica se o toque está na área do painel de chat para touch scroll
+      const PW = Math.min(W - 20, 320);
+      const lineH = 18;
+      const padV = 8;
+      const MAX_VISIBLE = 8;
+      const totalMsgs = this.chatMessages.length;
+      const slice = this.chatMessages.slice(
+        Math.max(0, totalMsgs - MAX_VISIBLE - this.chatHistoryScroll),
+        Math.max(0, totalMsgs - MAX_VISIBLE - this.chatHistoryScroll) + MAX_VISIBLE
+      );
+      const panelH = Math.max(lineH + padV * 2, slice.length * lineH + padV * 2);
+      const panelY = H - 195 - panelH;
+      
+      if (x >= 6 && x <= 6 + PW && y >= panelY && y <= panelY + panelH) {
+        this.touchScroll = {
+          active: true,
+          touchId: e.pointerId,
+          startY: y,
+          lastY: y,
+          target: "chat",
+        };
+        return;
+      }
       this.closeChatInput();
       return;
     }
@@ -916,6 +954,23 @@ export class Game {
             this.buyItem(btn.item);
             return;
           }
+        }
+        // Touch scroll na aba de comprar
+        const area = this.shopBuyContentArea;
+        if (
+          x >= area.x &&
+          x <= area.x + area.w &&
+          y >= area.y &&
+          y <= area.y + area.h
+        ) {
+          this.touchScroll = {
+            active: true,
+            touchId: e.pointerId,
+            startY: y,
+            lastY: y,
+            target: "shop",
+          };
+          return;
         }
       }
       return; // swallow input while shop is open
@@ -1150,6 +1205,23 @@ export class Game {
             return;
           }
         }
+        // Touch scroll no inventário
+        const area = this.inventoryContentArea;
+        if (
+          x >= area.x &&
+          x <= area.x + area.w &&
+          y >= area.y &&
+          y <= area.y + area.h
+        ) {
+          this.touchScroll = {
+            active: true,
+            touchId: e.pointerId,
+            startY: y,
+            lastY: y,
+            target: "inventory",
+          };
+          return;
+        }
       }
       return; // swallow all input while inventory open
     }
@@ -1249,6 +1321,25 @@ export class Game {
     this.mouseTileCol = Math.floor(iso.col);
     this.mouseTileRow = Math.floor(iso.row);
 
+    // Touch scroll
+    if (this.touchScroll.active && e.pointerId === this.touchScroll.touchId) {
+      const deltaY = this.touchScroll.lastY - e.clientY;
+      this.touchScroll.lastY = e.clientY;
+      
+      if (this.touchScroll.target === "shop") {
+        this.shopBuyScroll = Math.max(0, this.shopBuyScroll + deltaY);
+      } else if (this.touchScroll.target === "inventory") {
+        this.inventoryScroll = Math.max(0, this.inventoryScroll + deltaY);
+      } else if (this.touchScroll.target === "chat") {
+        this.chatHistoryScroll = Math.max(
+          0,
+          this.chatHistoryScroll + Math.sign(deltaY)
+        );
+      }
+      e.preventDefault();
+      return;
+    }
+
     if (!this.joystick.active || e.pointerId !== this.joystick.touchId) return;
     const maxR = 50;
     const dx = e.clientX - this.joystick.startX;
@@ -1261,6 +1352,10 @@ export class Game {
   }
 
   private onPointerUp(e: PointerEvent) {
+    if (e.pointerId === this.touchScroll.touchId) {
+      this.touchScroll.active = false;
+      this.touchScroll.target = null;
+    }
     if (e.pointerId === this.joystick.touchId) {
       this.joystick.active = false;
       this.joystick.dx = 0;
@@ -4139,7 +4234,7 @@ export class Game {
         ctx.font = "10px sans-serif";
         ctx.fillStyle = "#FFD700";
         ctx.textAlign = "left";
-        ctx.fillText("▲ scroll (roda do mouse)", 14, panelY - 5);
+        ctx.fillText("▲ arraste ou use a roda para scroll", 14, panelY - 5);
         ctx.restore();
       }
 
