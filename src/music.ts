@@ -6,11 +6,11 @@
 type TrackName = "main" | "second" | "night";
 
 let audio: Record<TrackName, HTMLAudioElement> | null = null;
-let enabled = true;
+let enabled = localStorage.getItem("cowboy_music_enabled") !== "false"; // padrão: true
 let current: TrackName | null = null;
-let dayIndex = 0;       // alternates 0=main / 1=second each loop
+let dayIndex = 0; // alternates 0=main / 1=second each loop
 let nightMode = false;
-let changing = false;   // guard against ended-cascade during track switch
+let changing = false; // guard against ended-cascade during track switch
 
 function make(file: string): HTMLAudioElement {
   const a = new Audio("/sounds/soundtrack/" + file);
@@ -27,9 +27,13 @@ function playTrack(name: TrackName) {
     audio[t].currentTime = 0;
   }
   current = name;
-  audio[name].play().catch(() => { /* autoplay blocked */ });
+  audio[name].play().catch(() => {
+    /* autoplay blocked */
+  });
   // Small timeout so ended-events from the pause above are ignored
-  setTimeout(() => { changing = false; }, 80);
+  setTimeout(() => {
+    changing = false;
+  }, 80);
 }
 
 function onEnded() {
@@ -45,39 +49,47 @@ function onEnded() {
 /** Call once from main.ts — idempotent */
 export function initMusic() {
   if (audio) return; // already initialised
-  audio = { main: make("main.ogg"), second: make("second.ogg"), night: make("night.ogg") };
-  audio.main.addEventListener("ended",   onEnded);
+  audio = {
+    main: make("main.ogg"),
+    second: make("second.ogg"),
+    night: make("night.ogg"),
+  };
+  audio.main.addEventListener("ended", onEnded);
   audio.second.addEventListener("ended", onEnded);
-  audio.night.addEventListener("ended",  onEnded);
+  audio.night.addEventListener("ended", onEnded);
 
   // Start on first user gesture (browser autoplay policy)
   const startOnce = () => {
     if (!enabled || current !== null) return;
     playTrack(nightMode ? "night" : "main");
     window.removeEventListener("pointerdown", startOnce);
-    window.removeEventListener("keydown",     startOnce);
+    window.removeEventListener("keydown", startOnce);
   };
   window.addEventListener("pointerdown", startOnce);
-  window.addEventListener("keydown",     startOnce);
+  window.addEventListener("keydown", startOnce);
 }
 
 export function setNightMode(isNight: boolean) {
   if (nightMode === isNight) return;
   nightMode = isNight;
   if (current === null) return; // not started yet
-  playTrack(nightMode ? "night" : (dayIndex === 0 ? "main" : "second"));
+  playTrack(nightMode ? "night" : dayIndex === 0 ? "main" : "second");
 }
 
 export function toggleMusic(): boolean {
   enabled = !enabled;
+  localStorage.setItem("cowboy_music_enabled", String(enabled));
   if (!audio) return enabled;
   if (!enabled) {
-    for (const t of ["main", "second", "night"] as TrackName[]) audio[t].pause();
+    for (const t of ["main", "second", "night"] as TrackName[])
+      audio[t].pause();
   } else {
     current = null; // force restart
-    playTrack(nightMode ? "night" : (dayIndex === 0 ? "main" : "second"));
+    playTrack(nightMode ? "night" : dayIndex === 0 ? "main" : "second");
   }
   return enabled;
 }
 
-export function isMusicEnabled(): boolean { return enabled; }
+export function isMusicEnabled(): boolean {
+  return enabled;
+}

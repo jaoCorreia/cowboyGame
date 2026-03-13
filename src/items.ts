@@ -5,6 +5,7 @@ export interface GameItem {
   icon: string; // emoji icon for display
   basePrice: number; // price at level 0 → 1; multiplied by (level + 1)
   maxLevel: number;
+  placeable?: boolean; // se true, level = quantidade; pode ser posicionado no mapa
 }
 
 export const SHOP_ITEMS: GameItem[] = [
@@ -49,9 +50,28 @@ export const SHOP_ITEMS: GameItem[] = [
     basePrice: 10000,
     maxLevel: 1,
   },
+  {
+    id: "bancada_individual",
+    name: "Bancada Individual",
+    description: "Bancada de criação visível só para você. Posicione no mapa.",
+    icon: "🔨",
+    basePrice: 300,
+    maxLevel: 10,
+    placeable: true,
+  },
+  {
+    id: "bancada_comunitaria",
+    name: "Bancada Comunitária",
+    description: "Bancada visível a todos os jogadores. Mais cara.",
+    icon: "🏗️",
+    basePrice: 800,
+    maxLevel: 10,
+    placeable: true,
+  },
 ];
 
 /** Price to upgrade from currentLevel → currentLevel+1 */
 export function itemNextPrice(item: GameItem, currentLevel: number): number {
+  if (item.placeable) return item.basePrice; // preço fixo por unidade
   return item.basePrice * (currentLevel + 1);
 }

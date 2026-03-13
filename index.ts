@@ -24,6 +24,17 @@ try {
 const db = mongo.db("cowboyGame");
 const users = db.collection("users");
 
+interface PlacedObjectDoc {
+  _id: ObjectId;
+  type: "bancada_individual" | "bancada_comunitaria";
+  owner: string;
+  ownerColor: string;
+  col: number;
+  row: number;
+  placedAt: Date;
+}
+const placedObjects = db.collection<PlacedObjectDoc>("placedObjects");
+
 await users.createIndex(
   { username: 1 },
   { unique: true, collation: { locale: "en", strength: 2 } },
@@ -267,6 +278,169 @@ server = Bun.serve<WsData>({
       });
     },
 
+    // ── Placed Objects ────────────────────────────────────────────────────────
+
+    "/objects": async (req: Request) => {
+      if (req.method !== "GET")
+        return new Response("Method Not Allowed", { status: 405 });
+      const token = new URL(req.url).searchParams.get("token") ?? "";
+      const sess = sessions.get(token);
+      if (!sess) return new Response("Unauthorized", { status: 401 });
+
+      const objs = await placedObjects
+        .find({
+          $or: [
+            { type: "bancada_comunitaria" },
+            { type: "bancada_individual", owner: sess.username },
+          ],
+        })
+        .toArray();
+
+      return Response.json(
+        objs.map((o) => ({
+          id: o._id.toString(),
+          type: o.type,
+          owner: o.owner,
+          ownerColor: o.ownerColor,
+          col: o.col,
+          row: o.row,
+        })),
+      );
+    },
+
+    "/objects/place": async (req: Request) => {
+      if (req.method !== "POST")
+        return new Response("Method Not Allowed", { status: 405 });
+      const body = (await req.json()) as {
+        token?: string;
+        type?: string;
+        col?: number;
+        row?: number;
+      };
+      const sess = sessions.get(body.token ?? "");
+      if (!sess) return new Response("Unauthorized", { status: 401 });
+
+      const validTypes = ["bancada_individual", "bancada_comunitaria"];
+      if (!validTypes.includes(body.type ?? ""))
+        return Response.json({ error: "Tipo inválido" }, { status: 400 });
+      if (typeof body.col !== "number" || typeof body.row !== "number")
+        return Response.json({ error: "Posição inválida" }, { status: 400 });
+
+      const col = Math.round(body.col * 10) / 10;
+      const row = Math.round(body.row * 10) / 10;
+      const type = body.type as "bancada_individual" | "bancada_comunitaria";
+
+      const user = (await users.findOne({
+        _id: new ObjectId(sess.userId),
+      })) as UserDoc | null;
+      if (!user) return new Response("Unauthorized", { status: 401 });
+
+      const qty = (user.inventory[type] ?? 0) as number;
+      if (qty <= 0)
+        return Response.json(
+          { error: "Sem bancada no inventário" },
+          { status: 400 },
+        );
+
+      // Bancada comunitária: máximo 1 no chão por usuário
+      if (type === "bancada_comunitaria") {
+        const existing = await placedObjects.findOne({
+          type: "bancada_comunitaria",
+          owner: sess.username,
+        });
+        if (existing)
+          return Response.json(
+            { error: "Você já tem uma bancada comunitária no mapa" },
+            { status: 400 },
+          );
+      }
+
+      // Verificar sobreposição com outra bancada (dentro de 1 tile)
+      const overlap = await placedObjects.findOne({
+        col: { $gte: col - 1, $lte: col + 1 },
+        row: { $gte: row - 1, $lte: row + 1 },
+      });
+      if (overlap)
+        return Response.json(
+          { error: "Já existe uma bancada nessa posição" },
+          { status: 400 },
+        );
+
+      const newInventory = { ...user.inventory };
+      if (qty <= 1) delete newInventory[type];
+      else newInventory[type] = qty - 1;
+
+      await users.updateOne(
+        { _id: new ObjectId(sess.userId) },
+        { $set: { inventory: newInventory } },
+      );
+
+      const result = await placedObjects.insertOne({
+        type,
+        owner: sess.username,
+        ownerColor: sess.color,
+        col,
+        row,
+        placedAt: new Date(),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+
+      if (type === "bancada_comunitaria") {
+        server.publish(
+          "game",
+          JSON.stringify({
+            type: "object_placed",
+            id: result.insertedId.toString(),
+            objectType: type,
+            owner: sess.username,
+            ownerColor: sess.color,
+            col,
+            row,
+          }),
+        );
+      }
+
+      return Response.json({
+        id: result.insertedId.toString(),
+        inventory: newInventory,
+      });
+    },
+
+    "/objects/:id": async (req: Request) => {
+      if (req.method !== "DELETE")
+        return new Response("Method Not Allowed", { status: 405 });
+      const token = new URL(req.url).searchParams.get("token") ?? "";
+      const sess = sessions.get(token);
+      if (!sess) return new Response("Unauthorized", { status: 401 });
+
+      const id = new URL(req.url).pathname.split("/").pop() ?? "";
+      let objId: ObjectId;
+      try {
+        objId = new ObjectId(id);
+      } catch {
+        return Response.json({ error: "ID inválido" }, { status: 400 });
+      }
+
+      const obj = await placedObjects.findOne({ _id: objId });
+      if (!obj) return Response.json({ error: "Objeto não encontrado" }, { status: 404 });
+      if (obj.owner !== sess.username)
+        return Response.json({ error: "Sem permissão" }, { status: 403 });
+
+      await placedObjects.deleteOne({ _id: objId });
+
+      // Devolve 1 unidade ao inventário do dono
+      await users.updateOne(
+        { _id: new ObjectId(sess.userId) },
+        { $inc: { [`inventory.${obj.type}`]: 1 } },
+      );
+
+      if (obj.type === "bancada_comunitaria") {
+        server.publish("game", JSON.stringify({ type: "object_removed", id }));
+      }
+
+      return new Response("OK");
+    },
+
     "/auth/save": async (req: Request) => {
       if (req.method !== "POST")
         return new Response("Method Not Allowed", { status: 405 });
@@ -376,6 +550,11 @@ server = Bun.serve<WsData>({
       const savedTypeIds: string[] = row?.basedCows ?? [];
       const savedBasedPositions = savedTypeIds.map((_, i) => userSlotToPos(i));
 
+      // Carrega bancadas comunitárias existentes para enviar ao novo jogador
+      const communityBenches = await placedObjects
+        .find({ type: "bancada_comunitaria" })
+        .toArray();
+
       ws.send(
         JSON.stringify({
           type: "init",
@@ -396,6 +575,14 @@ server = Bun.serve<WsData>({
           basedCows: [...players.values()]
             .filter((p) => p.basedCows.length > 0)
             .map((p) => ({ id: p.id, color: p.color, cows: p.basedCows })),
+          communityBenches: communityBenches.map((o) => ({
+            id: o._id.toString(),
+            objectType: o.type,
+            owner: o.owner,
+            ownerColor: o.ownerColor,
+            col: o.col,
+            row: o.row,
+          })),
         }),
       );
 

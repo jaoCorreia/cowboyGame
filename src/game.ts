@@ -39,7 +39,12 @@ import { type Tile, type TileType, generateMap, isObstacle } from "./mapGen";
 import { type CowType, COW_TYPES, randomCowType } from "./cowTypes";
 import { sprites } from "./sprites";
 import { toggleMusic, isMusicEnabled, setNightMode } from "./music";
-import { Network, type RemotePlayer, type ChatMessage } from "./network";
+import {
+  Network,
+  type RemotePlayer,
+  type ChatMessage,
+  type PlacedObject,
+} from "./network";
 import { type UserData, saveGameState } from "./auth";
 import { type GameItem, SHOP_ITEMS, itemNextPrice } from "./items";
 
@@ -218,6 +223,23 @@ export class Game {
   private saveTimer = 60;
   private cowSpawnTimer = 45; // tempo até o próximo spawn de vaca
   private nextCowId = COW_COUNT;
+  private placedObjects: PlacedObject[] = [];
+  private placementMode: string | null = null; // itemId da bancada sendo posicionada
+  private mouseTileCol = 0;
+  private mouseTileRow = 0;
+  private benchHubOpen = false;
+  private activeBench: PlacedObject | null = null;
+  private benchHubCloseBtn = { x: 0, y: 0, r: 0 };
+  private benchPickupBtn = { x: 0, y: 0, w: 0, h: 0 };
+  private benchInteractBtn = { x: 0, y: 0, w: 0, h: 0 };
+  private benchCollectBtn = { x: 0, y: 0, w: 0, h: 0 };
+  private inventoryPlaceBtns: Array<{
+    item: GameItem;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+  }> = [];
   private chatMessages: Array<ChatMessage & { time: number }> = [];
   private chatOpen = false;
   private chatInput?: HTMLInputElement;
@@ -284,6 +306,8 @@ export class Game {
     h: number;
   }> = [];
   private shopCloseBtn = { x: 0, y: 0, r: 0 };
+  private shopBuyScroll = 0;
+  private shopBuyContentArea = { x: 0, y: 0, w: 0, h: 0 };
 
   // Inventário
   private inventoryOpen = false;
@@ -414,6 +438,7 @@ export class Game {
       spaceKey: new Image(),
       trunkIcon: new Image(),
       moneyIcon: new Image(),
+      benchIcon: new Image(),
     };
 
     this.icons.bookIcon.src = "/sprites/hud/icons/book_icon.png";
@@ -425,6 +450,7 @@ export class Game {
     this.icons.cowboy.src = "/sprites/hud/icons/lasso_icon.png";
     this.icons.spaceKey.src = "/sprites/hud/icons/space_key_icon.png";
     this.icons.moneyIcon.src = "/sprites/hud/icons/money_icon.png";
+    this.icons.benchIcon.src = "/sprites/itens/individual_workbanch.png";
 
     // Pre-load item icons that are image paths
     for (const item of SHOP_ITEMS) {
@@ -523,7 +549,18 @@ export class Game {
           this.tradeResultTimer = 2.0;
           this.tradeItem = null;
         },
+        onObjectPlaced: (obj) => {
+          // Evita duplicatas (ex: se o próprio jogador já adicionou localmente)
+          if (!this.placedObjects.find((o) => o.id === obj.id)) {
+            this.placedObjects.push(obj);
+          }
+        },
+        onObjectRemoved: (id) => {
+          this.placedObjects = this.placedObjects.filter((o) => o.id !== id);
+        },
       });
+
+      this.loadPlacedObjects();
 
       window.addEventListener("beforeunload", () => {
         // sendBeacon garante entrega mesmo ao fechar a aba (fetch seria cancelado)
@@ -671,6 +708,15 @@ export class Game {
         return;
       }
       if (e.key === "Escape") {
+        if (this.placementMode) {
+          this.placementMode = null;
+          return;
+        }
+        if (this.benchHubOpen) {
+          this.benchHubOpen = false;
+          this.activeBench = null;
+          return;
+        }
         if (this.tradeState !== "idle") {
           this.tradeState = "idle";
           this.tradeItem = null;
@@ -712,6 +758,18 @@ export class Game {
           if (e.deltaY > 0) this.bookFlipPage(1);
           else if (e.deltaY < 0) this.bookFlipPage(-1);
           e.preventDefault();
+        } else if (this.shopOpen && this.shopTab === "buy") {
+          // Scroll na aba de comprar
+          const area = this.shopBuyContentArea;
+          if (
+            e.clientX >= area.x &&
+            e.clientX <= area.x + area.w &&
+            e.clientY >= area.y &&
+            e.clientY <= area.y + area.h
+          ) {
+            this.shopBuyScroll = Math.max(0, this.shopBuyScroll + e.deltaY);
+            e.preventDefault();
+          }
         } else if (this.chatOpen) {
           this.chatHistoryScroll = Math.max(
             0,
@@ -764,6 +822,7 @@ export class Game {
           y <= btn.y + btn.h
         ) {
           this.shopTab = btn.tab;
+          this.shopBuyScroll = 0; // Reset scroll ao trocar de aba
           return;
         }
       }
@@ -899,6 +958,29 @@ export class Game {
       }
     }
 
+    // Bench collect button (só dono)
+    const cb = this.benchCollectBtn;
+    if (cb.w > 0 && x >= cb.x && x <= cb.x + cb.w && y >= cb.y && y <= cb.y + cb.h) {
+      const bench = this.nearestBench();
+      if (bench) void this.pickupBench(bench);
+      return;
+    }
+
+    // Bench hub interaction
+    if (this.benchHubOpen) {
+      if (Math.hypot(x - this.benchHubCloseBtn.x, y - this.benchHubCloseBtn.y) < this.benchHubCloseBtn.r + 6) {
+        this.benchHubOpen = false;
+        this.activeBench = null;
+        return;
+      }
+      const pb = this.benchPickupBtn;
+      if (pb.w > 0 && x >= pb.x && x <= pb.x + pb.w && y >= pb.y && y <= pb.y + pb.h) {
+        void this.pickupBench(this.activeBench!);
+        return;
+      }
+      return; // swallow input while hub open
+    }
+
     // Inventory panel interaction
     if (this.inventoryOpen) {
       // Close button
@@ -997,6 +1079,17 @@ export class Game {
             return;
           }
         }
+        for (const btn of this.inventoryPlaceBtns) {
+          if (
+            x >= btn.x &&
+            x <= btn.x + btn.w &&
+            y >= btn.y &&
+            y <= btn.y + btn.h
+          ) {
+            this.startPlacement(btn.item);
+            return;
+          }
+        }
       }
       return; // swallow all input while inventory open
     }
@@ -1051,6 +1144,17 @@ export class Game {
     }
 
     // Stake aiming — click on map to throw
+    // Modo de posicionamento — clique no mapa para colocar bancada
+    if (this.placementMode) {
+      const iso = this.screenToIso(x, y);
+      const tileCol = Math.floor(iso.col);
+      const tileRow = Math.floor(iso.row);
+      if (this.isPlacementValid(tileCol, tileRow)) {
+        void this.placeObject(tileCol + 0.5, tileRow + 0.5);
+      }
+      return;
+    }
+
     if (this.stake.phase === "aiming") {
       this.throwStakeTo(x, y);
       return;
@@ -1080,6 +1184,11 @@ export class Game {
   }
 
   private onPointerMove(e: PointerEvent) {
+    // Rastreia tile sob o cursor para preview de posicionamento
+    const iso = this.screenToIso(e.clientX, e.clientY);
+    this.mouseTileCol = Math.floor(iso.col);
+    this.mouseTileRow = Math.floor(iso.row);
+
     if (!this.joystick.active || e.pointerId !== this.joystick.touchId) return;
     const maxR = 50;
     const dx = e.clientX - this.joystick.startX;
@@ -1110,7 +1219,13 @@ export class Game {
         // Dismiss and open shop
         this.vendorDialog.active = false;
         this.shopOpen = true;
+        this.shopBuyScroll = 0;
       }
+      return;
+    }
+    if (this.benchHubOpen) {
+      this.benchHubOpen = false;
+      this.activeBench = null;
       return;
     }
     if (this.shopOpen) {
@@ -1136,6 +1251,13 @@ export class Game {
       nearBandit.state = "scared";
       return;
     }
+    const nearBench = this.nearestBench();
+    if (nearBench) {
+      // E = Interagir (abrir hub de criação)
+      this.activeBench = nearBench;
+      this.benchHubOpen = true;
+      return;
+    }
     if (this.isAtVendor()) {
       if (!this.vendorMet) {
         // First meeting — show intro dialog
@@ -1151,6 +1273,7 @@ export class Game {
         return;
       }
       this.shopOpen = true;
+      this.shopBuyScroll = 0;
       this.discoveredNPCs.add("vendedor");
       return;
     }
@@ -1744,6 +1867,20 @@ export class Game {
     );
   }
 
+  private nearestBench(): PlacedObject | null {
+    const BENCH_INTERACT_DIST = 2;
+    let best: PlacedObject | null = null;
+    let bd = Infinity;
+    for (const obj of this.placedObjects) {
+      const d = dist(this.player, obj);
+      if (d < BENCH_INTERACT_DIST && d < bd) {
+        bd = d;
+        best = obj;
+      }
+    }
+    return best;
+  }
+
   private saveCoinsLocally() {
     localStorage.setItem(`cowboy_coins_${this.myName}`, String(this.coins));
   }
@@ -1833,6 +1970,101 @@ export class Game {
     this.triggerSave();
   }
 
+  private isPlacementValid(tileCol: number, tileRow: number): boolean {
+    const tile = this.map[tileRow]?.[tileCol];
+    if (!tile) return false;
+    if (tile.type === "water" || tile.type === "base") return false;
+    if (tile.decoration !== "none") return false;
+    // Verificar sobreposição com bancada existente (distância < 1 tile)
+    const col = tileCol + 0.5;
+    const row = tileRow + 0.5;
+    if (this.placedObjects.some((o) => Math.abs(o.col - col) < 1 && Math.abs(o.row - row) < 1))
+      return false;
+    // Bancada comunitária: máximo 1 por jogador
+    if (
+      this.placementMode === "bancada_comunitaria" &&
+      this.placedObjects.some((o) => o.type === "bancada_comunitaria" && o.owner === this.myName)
+    )
+      return false;
+    return true;
+  }
+
+  private startPlacement(item: GameItem) {
+    this.placementMode = item.id;
+    this.inventoryOpen = false;
+  }
+
+  private async placeObject(col: number, row: number) {
+    const type = this.placementMode;
+    if (!type || !this.myToken) return;
+    this.placementMode = null;
+
+    const res = await fetch("/objects/place", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: this.myToken, type, col, row }),
+    });
+    if (!res.ok) return;
+
+    const data = (await res.json()) as {
+      id: string;
+      inventory: Record<string, number>;
+    };
+    this.inventory = new Map(Object.entries(data.inventory));
+
+    // Bancada individual não vem via WS — adiciona localmente
+    if (type === "bancada_individual") {
+      this.placedObjects.push({
+        id: data.id,
+        type,
+        owner: this.myName,
+        ownerColor: this.myColor,
+        col,
+        row,
+      });
+    }
+    // Bancada comunitária chega via WS broadcast (onObjectPlaced)
+  }
+
+  private async pickupBench(obj: PlacedObject) {
+    if (!this.myToken) return;
+    const res = await fetch(
+      `/objects/${obj.id}?token=${encodeURIComponent(this.myToken)}`,
+      { method: "DELETE" },
+    );
+    if (!res.ok) return;
+
+    // Devolve ao inventário
+    const cur = this.inventory.get(obj.type) ?? 0;
+    const item = SHOP_ITEMS.find((it) => it.id === obj.type);
+    if (item) this.inventory.set(obj.type, Math.min(cur + 1, item.maxLevel));
+
+    // Remove localmente
+    this.placedObjects = this.placedObjects.filter((o) => o.id !== obj.id);
+    this.benchHubOpen = false;
+    this.activeBench = null;
+    this.triggerSave();
+  }
+
+  private async loadPlacedObjects() {
+    if (!this.myToken) return;
+    try {
+      const res = await fetch(
+        `/objects?token=${encodeURIComponent(this.myToken)}`,
+      );
+      if (!res.ok) return;
+      const data = (await res.json()) as PlacedObject[];
+      // Merge: não duplica objetos que já vieram via WS (communityBenches no init)
+      for (const obj of data) {
+        if (!this.placedObjects.find((o) => o.id === obj.id)) {
+          this.placedObjects.push(obj);
+        }
+      }
+    } catch {
+      /* ignorar falha de rede */
+    }
+  }
+
   private startTradeOffer(item: GameItem) {
     this.tradeItem = item;
     this.tradeItemLevel = this.inventory.get(item.id) ?? 1;
@@ -1886,6 +2118,29 @@ export class Game {
 
   // ─── Coordinates ──────────────────────────────────────────────────────────
 
+  private wrapTextLines(
+    text: string,
+    maxWidth: number,
+    font: string,
+  ): string[] {
+    const { ctx } = this;
+    ctx.font = font;
+    const words = text.split(" ");
+    const lines: string[] = [];
+    let currentLine = "";
+    for (const word of words) {
+      const testLine = currentLine ? currentLine + " " + word : word;
+      if (ctx.measureText(testLine).width > maxWidth && currentLine) {
+        lines.push(currentLine);
+        currentLine = word;
+      } else {
+        currentLine = testLine;
+      }
+    }
+    if (currentLine) lines.push(currentLine);
+    return lines;
+  }
+
   private isoToScreen(col: number, row: number) {
     return {
       x: (col - row) * (TILE_W / 2) + this.camX,
@@ -1935,6 +2190,7 @@ export class Game {
     if (this.bookOpen) this.renderBook();
     else this.renderUI();
     if (this.shopOpen) this.renderShop();
+    if (this.benchHubOpen && this.activeBench) this.renderBenchHub();
   }
 
   // ─── Tile drawing ─────────────────────────────────────────────────────────
@@ -2526,8 +2782,34 @@ export class Game {
       }
     }
 
+    // Bancadas posicionadas
+    for (const obj of this.placedObjects) {
+      const o = obj;
+      items.push({
+        depth: o.col + o.row,
+        draw: () => this.drawBench(o),
+      });
+    }
+
+    // Preview de posicionamento (tile hover)
+    if (this.placementMode) {
+      const mc = this.mouseTileCol;
+      const mr = this.mouseTileRow;
+      const pm = this.placementMode;
+      const valid = this.isPlacementValid(mc, mr);
+      items.push({
+        depth: mc + 0.5 + mr + 0.5 + 0.0001,
+        draw: () => this.drawBenchPreview(mc + 0.5, mr + 0.5, pm, valid),
+      });
+    }
+
     items.sort((a, b) => a.depth - b.depth);
     for (const item of items) item.draw();
+
+    // HUD de modo posicionamento (por cima de tudo)
+    if (this.placementMode) {
+      this.drawPlacementHUD();
+    }
   }
 
   // ─── Player drawing ───────────────────────────────────────────────────────
@@ -2542,6 +2824,110 @@ export class Game {
     if (dc === -1 && dr === 0) return "west";
     if (dc === -1 && dr === -1) return "north-west";
     return "north";
+  }
+
+  // ─── Bench drawing ────────────────────────────────────────────────────────
+
+  private drawBench(obj: PlacedObject) {
+    const { ctx } = this;
+    const { x, y } = this.isoToScreen(obj.col, obj.row);
+    const isComm = obj.type === "bancada_comunitaria";
+
+    const spritePath = isComm
+      ? "itens/workbanch_comunity.png"
+      : "itens/individual_workbanch.png";
+    const sprite = sprites.get(spritePath);
+    if (sprite) {
+      const sw = 64, sh = 64;
+      ctx.drawImage(sprite, x - sw / 2, y - sh + 8, sw, sh);
+    } else {
+      // Fallback canvas
+      const hw = 22, hh = 11, tableH = 16;
+      ctx.save();
+      ctx.translate(x, y - 18);
+      ctx.fillStyle = isComm ? "#7a4e28" : "#5a3818";
+      ctx.beginPath();
+      ctx.moveTo(0, 0); ctx.lineTo(-hw, hh); ctx.lineTo(-hw, hh + tableH); ctx.lineTo(0, tableH); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = isComm ? "#5a3818" : "#3e2810";
+      ctx.beginPath();
+      ctx.moveTo(0, 0); ctx.lineTo(hw, hh); ctx.lineTo(hw, hh + tableH); ctx.lineTo(0, tableH); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = isComm ? "#c4884f" : "#9a6a3a";
+      ctx.beginPath();
+      ctx.moveTo(0, -hh); ctx.lineTo(hw, 0); ctx.lineTo(0, hh); ctx.lineTo(-hw, 0); ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = "rgba(0,0,0,0.45)"; ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, -hh); ctx.lineTo(hw, 0); ctx.lineTo(hw, hh + tableH);
+      ctx.lineTo(0, hh + tableH); ctx.lineTo(-hw, hh + tableH); ctx.lineTo(-hw, hh); ctx.lineTo(0, -hh); ctx.stroke();
+      ctx.restore();
+    }
+
+    // Label de dono
+    ctx.save();
+    ctx.textAlign = "center";
+    ctx.textBaseline = "bottom";
+    if (isComm) {
+      ctx.font = "bold 10px sans-serif";
+      ctx.fillStyle = "#FFD700";
+      ctx.fillText("👥 " + obj.owner, x, y - 56);
+    } else {
+      ctx.font = "9px sans-serif";
+      ctx.fillStyle = obj.ownerColor;
+      ctx.fillText(obj.owner, x, y - 56);
+    }
+    ctx.restore();
+  }
+
+  private drawBenchPreview(col: number, row: number, type: string, valid: boolean) {
+    const { ctx } = this;
+    const { x, y } = this.isoToScreen(col, row);
+    const isComm = type === "bancada_comunitaria";
+    const hw = 22,
+      hh = 11,
+      tableH = 16;
+
+    ctx.save();
+    ctx.globalAlpha = 0.6;
+    ctx.translate(x, y - 18);
+
+    ctx.fillStyle = valid ? (isComm ? "#c4884f" : "#9a6a3a") : "#aa2222";
+    ctx.beginPath();
+    ctx.moveTo(0, -hh);
+    ctx.lineTo(hw, 0);
+    ctx.lineTo(hw, hh + tableH);
+    ctx.lineTo(-hw, hh + tableH);
+    ctx.lineTo(-hw, hh);
+    ctx.lineTo(0, -hh);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.strokeStyle = valid ? "#98FF98" : "#FF4444";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  private drawPlacementHUD() {
+    const { ctx, canvas } = this;
+    const W = canvas.width;
+    const H = canvas.height;
+    ctx.save();
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    ctx.fillRect(0, H - 48, W, 48);
+    ctx.font = "bold 13px sans-serif";
+    ctx.fillStyle = "#FFD700";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    const label =
+      this.placementMode === "bancada_comunitaria"
+        ? "🏗️ Bancada Comunitária"
+        : "🔨 Bancada Individual";
+    ctx.fillText(
+      `${label} — Clique no mapa para posicionar | ESC para cancelar`,
+      W / 2,
+      H - 24,
+    );
+    ctx.restore();
   }
 
   // ─── Remote player drawing ────────────────────────────────────────────────
@@ -3192,6 +3578,7 @@ export class Game {
       this.ctx.fillText("Escapou! 💨", W / 2, H / 2 + 8);
     }
 
+    this.renderBenchActions(W, H);
     this.renderContextHint(W, H);
     this.renderMobileControls();
 
@@ -3679,6 +4066,7 @@ export class Game {
     const { ctx } = this;
     this.inventoryDropBtns = [];
     this.inventoryTradeBtns = [];
+    this.inventoryPlaceBtns = [];
     if (ownedItems.length === 0) {
       ctx.font = "13px sans-serif";
       ctx.fillStyle = "#7a6040";
@@ -3733,23 +4121,31 @@ export class Game {
       ctx.font = "10px sans-serif";
       ctx.fillStyle = "#C8A870";
       ctx.fillText(item.description, PX + 52, cy + 32);
-      for (let p = 0; p < item.maxLevel; p++) {
-        ctx.fillStyle = p < level ? "#FFD700" : "#3a2208";
-        ctx.beginPath();
-        ctx.arc(PX + 54 + p * 14, cy + 50, 5, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = "#9b7e57";
-        ctx.lineWidth = 1;
-        ctx.stroke();
+      if (item.placeable) {
+        // Itens placeáveis: mostrar quantidade em vez de dots de nível
+        ctx.font = "bold 11px sans-serif";
+        ctx.fillStyle = "#98FF98";
+        ctx.textAlign = "left";
+        ctx.fillText(`x${level} no inventário`, PX + 54, cy + 54);
+      } else {
+        for (let p = 0; p < item.maxLevel; p++) {
+          ctx.fillStyle = p < level ? "#FFD700" : "#3a2208";
+          ctx.beginPath();
+          ctx.arc(PX + 54 + p * 14, cy + 50, 5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = "#9b7e57";
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }
+        ctx.font = "10px sans-serif";
+        ctx.fillStyle = "#C8A870";
+        ctx.textAlign = "left";
+        ctx.fillText(
+          `Lv ${level}/${item.maxLevel}`,
+          PX + 54 + item.maxLevel * 14 + 4,
+          cy + 54,
+        );
       }
-      ctx.font = "10px sans-serif";
-      ctx.fillStyle = "#C8A870";
-      ctx.textAlign = "left";
-      ctx.fillText(
-        `Lv ${level}/${item.maxLevel}`,
-        PX + 54 + item.maxLevel * 14 + 4,
-        cy + 54,
-      );
       const bH = 26,
         bW = 74;
       const dropX = PX + PW - (bW + 6) * 2 - 8,
@@ -3762,18 +4158,31 @@ export class Game {
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillText("🗑 Descartar", dropX + bW / 2, dropY + bH / 2);
-      this.drawPixelBtn(tradeX, tradeY, bW, bH, "normal");
-      ctx.fillStyle = "#FFD700";
-      ctx.fillText("↔ Trocar", tradeX + bW / 2, tradeY + bH / 2);
+      if (item.placeable) {
+        this.drawPixelBtn(tradeX, tradeY, bW, bH, "normal");
+        ctx.fillStyle = "#98FF98";
+        ctx.fillText("📍 Posicionar", tradeX + bW / 2, tradeY + bH / 2);
+        this.inventoryPlaceBtns.push({
+          item,
+          x: tradeX,
+          y: tradeY,
+          w: bW,
+          h: bH,
+        });
+      } else {
+        this.drawPixelBtn(tradeX, tradeY, bW, bH, "normal");
+        ctx.fillStyle = "#FFD700";
+        ctx.fillText("↔ Trocar", tradeX + bW / 2, tradeY + bH / 2);
+        this.inventoryTradeBtns.push({
+          item,
+          x: tradeX,
+          y: tradeY,
+          w: bW,
+          h: bH,
+        });
+      }
       ctx.textBaseline = "alphabetic";
       this.inventoryDropBtns.push({ item, x: dropX, y: dropY, w: bW, h: bH });
-      this.inventoryTradeBtns.push({
-        item,
-        x: tradeX,
-        y: tradeY,
-        w: bW,
-        h: bH,
-      });
       cy += ROW_H;
     }
   }
@@ -3960,6 +4369,13 @@ export class Game {
     ctx.font = "bold 15px sans-serif";
     ctx.fillStyle = "#FFD700";
     ctx.fillText(this.tradeResultMsg, PX + PW / 2, PY + PH / 2);
+  }
+
+  // ── Bench actions HUD ─────────────────────────────────────────────────────
+
+  private renderBenchActions(_W: number, _H: number) {
+    this.benchInteractBtn = { x: 0, y: 0, w: 0, h: 0 };
+    this.benchCollectBtn = { x: 0, y: 0, w: 0, h: 0 };
   }
 
   // ── Hint contextual ───────────────────────────────────────────────────────
@@ -4374,7 +4790,6 @@ export class Game {
           "[ E / clique para continuar ]",
           bx + bw - 14,
           by + bh - 12,
-          
         );
       }
     } else {
@@ -4509,9 +4924,13 @@ export class Game {
     let label = "E";
 
     const atVendor = this.isAtVendor();
+    const nearBench = this.nearestBench();
     if (this.lasso.active && this.lasso.phase === "pulling") {
       btnState = this.lasso.flashTimer > 0 ? "pressed" : "active";
       icon = this.icons.pull;
+    } else if (nearBench && !this.benchHubOpen) {
+      btnState = "active";
+      icon = this.icons.benchIcon;
     } else if (atVendor && !this.shopOpen) {
       btnState = "active";
       icon = this.icons.moneyIcon;
@@ -4925,15 +5344,20 @@ export class Game {
       }
 
       if (owned) {
-        const badgeText = maxed ? "MAX" : `Nív. ${level}/${item.maxLevel}`;
+        const badgeText = item.placeable
+          ? `x${level}`
+          : maxed
+            ? "MAX"
+            : `Nív. ${level}/${item.maxLevel}`;
         ctx.font = "bold 11px sans-serif";
         const bw = ctx.measureText(badgeText).width + 12;
         const bx = parchX + parchW - 28 - bw;
-        ctx.fillStyle = (maxed ? "#FFD700" : "#c8a060") + "44";
+        ctx.fillStyle =
+          (maxed && !item.placeable ? "#FFD700" : "#c8a060") + "44";
         ctx.beginPath();
         ctx.roundRect(bx, iy + 10, bw, 18, 5);
         ctx.fill();
-        ctx.fillStyle = maxed ? "#b08000" : "#6a4020";
+        ctx.fillStyle = maxed && !item.placeable ? "#b08000" : "#6a4020";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         ctx.fillText(badgeText, bx + bw / 2, iy + 19);
@@ -4994,7 +5418,13 @@ export class Game {
         ctx.save();
         ctx.translate(npcCX, npcCY - 14);
         ctx.scale(1.4, 1.4);
-        ctx.drawImage(img, -SW / 2, -SH / 2, SW, SH);
+        // Se for sprite sheet (bandit), extrair um frame específico
+        if (npc.spriteKey.includes("bandit")) {
+          // Pegar frame 0 da row 2 (direção leste)
+          ctx.drawImage(img, 0, 2 * SH, SW, SH, -SW / 2, -SH / 2, SW, SH);
+        } else {
+          ctx.drawImage(img, -SW / 2, -SH / 2, SW, SH);
+        }
         ctx.restore();
       } else {
         ctx.font = "52px sans-serif";
@@ -5222,6 +5652,86 @@ export class Game {
 
   // ─── Loja UI ──────────────────────────────────────────────────────────────
 
+  private renderBenchHub() {
+    const { ctx, canvas } = this;
+    const W = canvas.width,
+      H = canvas.height;
+    const bench = this.activeBench!;
+    const isComm = bench.type === "bancada_comunitaria";
+    const isOwner = bench.owner === this.myName;
+
+    const PW = Math.min(W - 32, 380);
+    const PH = 260;
+    const PX = (W - PW) / 2;
+    const PY = (H - PH) / 2;
+
+    ctx.fillStyle = "rgba(0,0,0,0.5)";
+    ctx.fillRect(0, 0, W, H);
+    this.drawPanel(PX, PY, PW, PH, 0);
+
+    // Título
+    ctx.textAlign = "center";
+    ctx.font = "bold 16px sans-serif";
+    ctx.fillStyle = "#FFD700";
+    const title = isComm ? "🏗️ Bancada Comunitária" : "🔨 Bancada Individual";
+    ctx.fillText(title, PX + PW / 2, PY + 28);
+
+    // Dono
+    ctx.font = "11px sans-serif";
+    ctx.fillStyle = bench.ownerColor;
+    ctx.fillText(`de ${bench.owner}`, PX + PW / 2, PY + 46);
+
+    // Divisor
+    ctx.strokeStyle = "rgba(200,160,80,0.4)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(PX + 10, PY + 58);
+    ctx.lineTo(PX + PW - 10, PY + 58);
+    ctx.stroke();
+
+    // Conteúdo (crafting — a ser implementado)
+    ctx.font = "12px sans-serif";
+    ctx.fillStyle = "#C8A870";
+    ctx.textAlign = "center";
+    ctx.fillText("Receitas de criação em breve...", PX + PW / 2, PY + 120);
+
+    // Botão fechar
+    const closeCX = PX + PW - 18,
+      closeCY = PY + 18;
+    ctx.fillStyle = "#9b3a18";
+    ctx.beginPath();
+    ctx.arc(closeCX, closeCY, 12, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "#e05030";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.fillStyle = "#FFE0A0";
+    ctx.font = "bold 13px sans-serif";
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "center";
+    ctx.fillText("✕", closeCX, closeCY);
+    ctx.textBaseline = "alphabetic";
+    this.benchHubCloseBtn = { x: closeCX, y: closeCY, r: 12 };
+
+    // Botão recolher (só o dono)
+    if (isOwner) {
+      const bW = 140,
+        bH = 30;
+      const bX = PX + PW / 2 - bW / 2;
+      const bY = PY + PH - 50;
+      this.drawPixelBtn(bX, bY, bW, bH, "normal");
+      ctx.fillStyle = "#FF9980";
+      ctx.font = "bold 11px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("📦 Recolher bancada", bX + bW / 2, bY + bH / 2);
+      ctx.textBaseline = "alphabetic";
+      this.benchPickupBtn = { x: bX, y: bY, w: bW, h: bH };
+    } else {
+      this.benchPickupBtn = { x: 0, y: 0, w: 0, h: 0 };
+    }
+  }
+
   private renderShop() {
     const { ctx, canvas } = this;
     const W = canvas.width,
@@ -5235,6 +5745,8 @@ export class Game {
 
     // ── Compute panel height per tab ──────────────────────────────────────────
     let contentH: number;
+    let totalBuyContentH = 0;
+    const MAX_BUY_VISIBLE_H = 420; // altura máxima visível na aba comprar
     if (this.shopTab === "sell") {
       const herdRows = Math.max(1, Math.min(herd.length, SELL_MAX));
       const herdSellAllH = herd.length > 0 ? 44 : 0;
@@ -5250,7 +5762,17 @@ export class Game {
         basedSellAllH +
         8;
     } else {
-      contentH = SHOP_ITEMS.length * 72 + 8;
+      // Calcular altura real do conteúdo (com alturas dinâmicas)
+      totalBuyContentH = 8;
+      for (const item of SHOP_ITEMS) {
+        const descLines = this.wrapTextLines(
+          item.description,
+          PW - 50 - 72 - 24,
+          "10px sans-serif",
+        );
+        totalBuyContentH += 72 + (descLines.length - 1) * 12;
+      }
+      contentH = Math.min(MAX_BUY_VISIBLE_H, totalBuyContentH);
     }
     const HEADER_H = 66; // title + coins
     const TAB_H = 38;
@@ -5504,7 +6026,6 @@ export class Game {
       // ── Buy tab ───────────────────────────────────────────────────────────────
     } else {
       this.shopBuyButtons = [];
-      let cy = contentY + 8;
       const btnW = 72;
       const textMaxWidth = PW - 50 - btnW - 24; // largura disponível para descrição
 
@@ -5531,6 +6052,32 @@ export class Game {
         return lines;
       };
 
+      // Calcular altura total do conteúdo
+      let totalContentHeight = 8;
+      for (const item of SHOP_ITEMS) {
+        const descLines = wrapText(
+          item.description,
+          textMaxWidth,
+          "10px sans-serif",
+        );
+        totalContentHeight += 72 + (descLines.length - 1) * 12;
+      }
+
+      // Limitar o scroll ao máximo
+      const maxScroll = Math.max(0, totalContentHeight - contentH);
+      this.shopBuyScroll = Math.min(this.shopBuyScroll, maxScroll);
+
+      // Guardar área de conteúdo para detectar scroll
+      this.shopBuyContentArea = { x: PX, y: contentY, w: PW, h: contentH };
+
+      // Aplicar clipping na área de conteúdo
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(PX + 4, contentY, PW - 8, contentH);
+      ctx.clip();
+
+      let cy = contentY + 8 - this.shopBuyScroll;
+
       for (const item of SHOP_ITEMS) {
         const level = this.inventory.get(item.id) ?? 0;
         const maxed = level >= item.maxLevel;
@@ -5545,12 +6092,18 @@ export class Game {
         );
         const itemH = 72 + (descLines.length - 1) * 12;
 
+        // Pular itens fora da área visível
+        if (cy + itemH < contentY || cy > contentY + contentH) {
+          cy += itemH;
+          continue;
+        }
+
         // Row bg
         ctx.fillStyle = "rgba(255,255,255,0.03)";
         ctx.fillRect(PX + 6, cy, PW - 12, itemH - 2);
 
         // Icon background
-        const iconX = PX + 28;
+        const iconX = PX + 36;
         const iconY = cy + 36;
         ctx.fillStyle = "rgba(200,160,80,0.25)";
         ctx.beginPath();
@@ -5583,44 +6136,55 @@ export class Game {
         ctx.textAlign = "left";
         ctx.font = "bold 12px sans-serif";
         ctx.fillStyle = "#FFE0A0";
-        ctx.fillText(item.name, PX + 50, cy + 18);
+        ctx.fillText(item.name, PX + 60, cy + 18);
 
         // Description (múltiplas linhas)
         ctx.font = "10px sans-serif";
         ctx.fillStyle = "#C8A870";
         let descY = cy + 32;
         for (const line of descLines) {
-          ctx.fillText(line, PX + 50, descY);
+          ctx.fillText(line, PX + 60, descY);
           descY += 12;
         }
 
-        // Level pips (ajustado para após a descrição)
+        // Level pips ou quantidade (para itens placeáveis)
         const pipsY = cy + 32 + descLines.length * 12 + 4;
-        ctx.fillStyle = "#9b7e57";
-        for (let i = 0; i < item.maxLevel; i++) {
-          ctx.fillStyle = i < level ? "#FFD700" : "#3a2208";
-          ctx.beginPath();
-          ctx.arc(PX + 52 + i * 14, pipsY, 5, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.strokeStyle = "#9b7e57";
-          ctx.lineWidth = 1;
-          ctx.stroke();
+        if (item.placeable) {
+          ctx.font = "bold 10px sans-serif";
+          ctx.fillStyle = level > 0 ? "#98FF98" : "#C8A870";
+          ctx.textAlign = "left";
+          ctx.fillText(
+            level > 0 ? `x${level} em estoque` : "Nenhuma em estoque",
+            PX + 62,
+            pipsY + 4,
+          );
+        } else {
+          ctx.fillStyle = "#9b7e57";
+          for (let i = 0; i < item.maxLevel; i++) {
+            ctx.fillStyle = i < level ? "#FFD700" : "#3a2208";
+            ctx.beginPath();
+            ctx.arc(PX + 62 + i * 14, pipsY, 5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = "#9b7e57";
+            ctx.lineWidth = 1;
+            ctx.stroke();
+          }
+          ctx.font = "10px sans-serif";
+          ctx.fillStyle = "#C8A870";
+          ctx.textAlign = "left";
+          ctx.fillText(
+            `Nível ${level}/${item.maxLevel}`,
+            PX + 62 + item.maxLevel * 14 + 4,
+            pipsY + 4,
+          );
         }
-        ctx.font = "10px sans-serif";
-        ctx.fillStyle = "#C8A870";
-        ctx.textAlign = "left";
-        ctx.fillText(
-          `Nível ${level}/${item.maxLevel}`,
-          PX + 52 + item.maxLevel * 14 + 4,
-          pipsY + 4,
-        );
 
         // Buy button
         const bW = 72,
           bH = 28;
         const bX = PX + PW - bW - 12,
           bY = cy + (itemH - bH) / 2;
-        if (maxed) {
+        if (maxed && !item.placeable) {
           this.drawPixelBtn(bX, bY, bW, bH, "pressed");
           ctx.fillStyle = "#7a6040";
           ctx.font = "bold 10px sans-serif";
@@ -5643,12 +6207,38 @@ export class Game {
             12,
           );
           ctx.fillText(priceText, bX + bW / 2, bY + bH / 2);
-          if (canAfford)
+          // Só adicionar botão se estiver visível
+          if (canAfford && bY + bH > contentY && bY < contentY + contentH)
             this.shopBuyButtons.push({ item, x: bX, y: bY, w: bW, h: bH });
         }
         ctx.textBaseline = "alphabetic";
 
         cy += itemH;
+      }
+
+      ctx.restore();
+
+      // Desenhar scrollbar se necessário
+      if (maxScroll > 0) {
+        const scrollBarH = contentH - 8;
+        const thumbH = Math.max(
+          30,
+          (contentH / totalContentHeight) * scrollBarH,
+        );
+        const thumbY =
+          contentY +
+          4 +
+          (this.shopBuyScroll / maxScroll) * (scrollBarH - thumbH);
+
+        // Track
+        ctx.fillStyle = "rgba(0,0,0,0.2)";
+        ctx.fillRect(PX + PW - 10, contentY + 4, 6, scrollBarH);
+
+        // Thumb
+        ctx.fillStyle = "rgba(200,160,80,0.6)";
+        ctx.beginPath();
+        ctx.roundRect(PX + PW - 10, thumbY, 6, thumbH, 3);
+        ctx.fill();
       }
     }
   }

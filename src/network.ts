@@ -31,6 +31,15 @@ export interface TradeOffer {
   level: number;
 }
 
+export interface PlacedObject {
+  id: string;
+  type: "bancada_individual" | "bancada_comunitaria";
+  owner: string;
+  ownerColor: string;
+  col: number;
+  row: number;
+}
+
 type MoveUpdate = Pick<
   RemotePlayer,
   "id" | "col" | "row" | "dirCol" | "dirRow" | "moving" | "herdCount"
@@ -47,6 +56,8 @@ type Callbacks = {
   onTradeOffer?(offer: TradeOffer): void;
   onTradeAccepted?(fromId: string): void;
   onTradeDeclined?(fromId: string): void;
+  onObjectPlaced?(obj: PlacedObject): void;
+  onObjectRemoved?(id: string): void;
 };
 
 export class Network {
@@ -70,6 +81,11 @@ export class Network {
             if (msg.basedCows && callbacks.onCowBased) {
               for (const batch of msg.basedCows) callbacks.onCowBased(batch);
             }
+            if (msg.communityBenches && callbacks.onObjectPlaced) {
+              for (const b of msg.communityBenches) {
+                callbacks.onObjectPlaced({ id: b.id, type: b.objectType, owner: b.owner, ownerColor: b.ownerColor, col: b.col, row: b.row });
+              }
+            }
             break;
           case "join":    callbacks.onJoin(msg.player); break;
           case "move":    callbacks.onMove(msg); break;
@@ -82,6 +98,12 @@ export class Network {
             break;
           case "trade_accepted": callbacks.onTradeAccepted?.(msg.fromId); break;
           case "trade_declined": callbacks.onTradeDeclined?.(msg.fromId); break;
+          case "object_placed":
+            callbacks.onObjectPlaced?.({ id: msg.id, type: msg.objectType, owner: msg.owner, ownerColor: msg.ownerColor, col: msg.col, row: msg.row });
+            break;
+          case "object_removed":
+            callbacks.onObjectRemoved?.(msg.id);
+            break;
         }
       } catch { /* ignore malformed */ }
     };
