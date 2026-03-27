@@ -178,6 +178,42 @@ function buildOverlay(resolve: (d: UserData) => void): HTMLElement {
   return ov;
 }
 
+// ─── Comprar pacote premium ────────────────────────────────────────────────────
+
+export async function buyPremium(token: string): Promise<void> {
+  try {
+    const res = await fetch("/stripe/checkout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token }),
+    });
+    const text = await res.text();
+    let data: { url?: string; error?: string };
+    try {
+      data = JSON.parse(text) as { url?: string; error?: string };
+    } catch {
+      console.error("[Stripe] resposta não-JSON:", text);
+      alert("Erro de servidor: " + text.slice(0, 200));
+      return;
+    }
+    if (data.url) {
+      window.location.href = data.url;
+    } else {
+      alert(data.error ?? "Erro ao iniciar pagamento.");
+    }
+  } catch (err) {
+    console.error("[Stripe] fetch error:", err);
+    alert("Erro de conexão ao iniciar pagamento.");
+  }
+}
+
+// ─── Logout ────────────────────────────────────────────────────────────────────
+
+export function logout(): void {
+  localStorage.removeItem(TOKEN_KEY);
+  location.reload();
+}
+
 // ─── Salvar estado ─────────────────────────────────────────────────────────────
 
 export async function saveGameState(

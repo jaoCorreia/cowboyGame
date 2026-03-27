@@ -53,6 +53,7 @@ type Callbacks = {
     myColor: string,
     myName: string,
     existing: RemotePlayer[],
+    birthdayCount: number,
   ): void;
   onJoin(player: RemotePlayer): void;
   onMove(update: MoveUpdate): void;
@@ -68,6 +69,8 @@ type Callbacks = {
   onTreeChopped?(pos: { col: number; row: number }): void;
   onTreeRegrown?(pos: { col: number; row: number }): void;
   onChoppedTreesInit?(trees: Array<{ col: number; row: number }>): void;
+  onPaymentSuccess?(coins: number): void;
+  onBirthdayCount?(count: number): void;
 };
 
 export class Network {
@@ -89,7 +92,7 @@ export class Network {
         const msg = JSON.parse(e.data as string);
         switch (msg.type) {
           case "init":
-            callbacks.onInit(msg.id, msg.color, msg.name, msg.players);
+            callbacks.onInit(msg.id, msg.color, msg.name, msg.players, msg.birthdayParabensCount ?? 0);
             if (msg.basedCows && callbacks.onCowBased) {
               for (const batch of msg.basedCows) callbacks.onCowBased(batch);
             }
@@ -169,6 +172,12 @@ export class Network {
             break;
           case "tree_regrow":
             callbacks.onTreeRegrown?.({ col: msg.col, row: msg.row });
+            break;
+          case "payment_success":
+            callbacks.onPaymentSuccess?.(msg.coins as number);
+            break;
+          case "birthday_count":
+            callbacks.onBirthdayCount?.(msg.count as number);
             break;
         }
       } catch {
@@ -258,5 +267,10 @@ export class Network {
   sendTreeChop(col: number, row: number) {
     if (!this.ready || !this.ws) return;
     this.ws.send(JSON.stringify({ type: "tree_chop", col, row }));
+  }
+
+  sendBirthdayParabens() {
+    if (!this.ready || !this.ws) return;
+    this.ws.send(JSON.stringify({ type: "birthday_parabens" }));
   }
 }

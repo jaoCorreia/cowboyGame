@@ -1,6 +1,11 @@
 import { MongoClient, ObjectId } from "mongodb";
 import { checkServerIdentity as tlsCheckServerIdentity } from "tls";
+import Stripe from "stripe";
 import index from "./index.html";
+
+const stripe = new Stripe(process.env.STRIPE_RESTRICTED_KEY!, { apiVersion: "2026-03-25.dahlia" });
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET!;
+const STRIPE_PREMIUM_PRICE_ID = process.env.STRIPE_PREMIUM_PRICE_ID!;
 
 const MONGO_URI = process.env.MONGO_URI;
 if (!MONGO_URI) throw new Error("MONGO_URI environment variable is not set");
@@ -43,6 +48,8 @@ interface ChoppedTreeDoc {
 }
 const choppedTreesColl = db.collection<ChoppedTreeDoc>("choppedTrees");
 await choppedTreesColl.createIndex({ col: 1, row: 1 }, { unique: true });
+
+const gameState = db.collection<{ _id: string; value: number }>("gameState");
 
 await users.createIndex(
   { username: 1 },
@@ -125,6 +132,8 @@ interface PlayerState {
 }
 
 const players = new Map<string, PlayerState>();
+const _bdDoc = await gameState.findOne({ _id: "birthdayParabensCount" });
+let birthdayParabensCount = _bdDoc?.value ?? 0;
 
 // ─── Server ───────────────────────────────────────────────────────────────────
 
@@ -536,6 +545,69 @@ server = Bun.serve<WsData>({
       return new Response("OK");
     },
 
+    // ── Stripe ────────────────────────────────────────────────────────────────
+
+    "/stripe/checkout": async (req: Request) => {
+      if (req.method !== "POST")
+        return new Response("Method Not Allowed", { status: 405 });
+      const { token } = (await req.json()) as { token?: string };
+      const sess = sessions.get(token ?? "");
+      if (!sess) return Response.json({ error: "Não autenticado." }, { status: 401 });
+
+      const origin = req.headers.get("origin") ?? "http://localhost:9400";
+      try {
+        const session = await stripe.checkout.sessions.create({
+          mode: "payment",
+          payment_method_types: ["card"],
+          line_items: [{ price: STRIPE_PREMIUM_PRICE_ID, quantity: 1 }],
+          metadata: { userId: sess.userId, username: sess.username },
+          success_url: `${origin}/?payment=success`,
+          cancel_url: `${origin}/?payment=cancelled`,
+        });
+        return Response.json({ url: session.url });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Erro ao criar sessão de pagamento.";
+        console.error("[Stripe] checkout error:", msg);
+        return Response.json({ error: msg }, { status: 502 });
+      }
+    },
+
+    "/stripe/webhook": async (req: Request) => {
+      if (req.method !== "POST")
+        return new Response("Method Not Allowed", { status: 405 });
+
+      const sig = req.headers.get("stripe-signature") ?? "";
+      const rawBody = await req.text();
+
+      let event: Stripe.Event;
+      try {
+        event = stripe.webhooks.constructEvent(rawBody, sig, STRIPE_WEBHOOK_SECRET);
+      } catch {
+        return new Response("Webhook signature invalid", { status: 400 });
+      }
+
+      if (event.type === "checkout.session.completed") {
+        const checkoutSession = event.data.object as Stripe.Checkout.Session;
+        const userId = checkoutSession.metadata?.userId;
+        if (userId) {
+          // Crédita 500 moedas ao jogador
+          await users.updateOne(
+            { _id: new ObjectId(userId) },
+            { $inc: { coins: 500 } },
+          );
+          // Notifica o jogador online se estiver conectado
+          const ws = activeWsByUserId.get(userId);
+          if (ws) {
+            try {
+              ws.send(JSON.stringify({ type: "payment_success", coins: 500 }));
+            } catch { /**/ }
+          }
+        }
+      }
+
+      return new Response("OK");
+    },
+
     "/auth/save": async (req: Request) => {
       if (req.method !== "POST")
         return new Response("Method Not Allowed", { status: 405 });
@@ -694,6 +766,7 @@ server = Bun.serve<WsData>({
             row: o.row,
           })),
           choppedTrees: choppedTreeDocs.map((t) => ({ col: t.col, row: t.row })),
+          birthdayParabensCount,
         }),
       );
 
@@ -870,6 +943,15 @@ server = Bun.serve<WsData>({
             `player:${u.fromId}`,
             JSON.stringify({ type: "trade_declined", fromId: id }),
           );
+        } else if (u.type === "birthday_parabens") {
+          birthdayParabensCount++;
+          server.publish("game", JSON.stringify({ type: "birthday_count", count: birthdayParabensCount }));
+          ws.send(JSON.stringify({ type: "birthday_count", count: birthdayParabensCount }));
+          gameState.updateOne(
+            { _id: "birthdayParabensCount" },
+            { $set: { value: birthdayParabensCount } },
+            { upsert: true },
+          ).catch(() => { /* silencioso */ });
         }
       } catch {
         /* ignora */

@@ -9,4 +9,17 @@ initMusic(); // starts on first user gesture, survives game restarts
 const preview = new Game(canvas, null);
 const userData = await initAuth();
 preview.destroy();
-new Game(canvas, userData);
+const game = new Game(canvas, userData);
+
+// Trata retorno do Stripe Checkout
+const paymentParam = new URLSearchParams(location.search).get("payment");
+if (paymentParam) {
+  history.replaceState(null, "", location.pathname);
+  if (paymentParam === "success") {
+    // O servidor já creditou via webhook; o WS notificará via payment_success.
+    // Mostramos mensagem no chat imediatamente para feedback visual.
+    game.addSystemMessage("✅ Pagamento confirmado! Suas moedas serão creditadas em instantes.");
+  } else if (paymentParam === "cancelled") {
+    game.addSystemMessage("❌ Pagamento cancelado.");
+  }
+}

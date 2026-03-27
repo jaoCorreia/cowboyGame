@@ -57,7 +57,7 @@ import {
   type ChatMessage,
   type PlacedObject,
 } from "./network";
-import { type UserData, saveGameState } from "./auth";
+import { type UserData, saveGameState, logout, buyPremium } from "./auth";
 import { type GameItem, SHOP_ITEMS, itemNextPrice } from "./items";
 
 interface NPCEntry {
@@ -201,6 +201,21 @@ function spawnCow(id: number, map: Tile[][], nightMode = false): Cow {
     sparkTimer: 0,
   };
 }
+
+// ── Evento: Aniversário do Criador ───────────────────────────────────────────
+const CAKE_COL = 12;
+const CAKE_ROW = 7;
+const CAKE_INTERACT_DIST = 2.5;
+const BIRTHDAY_MONTH = 3; // Março
+const BIRTHDAY_DAY_START = 10;
+const BIRTHDAY_DAY_END = 31;
+const PARABENS_MESSAGES = [
+  "Que seus laços sejam eternamente certeiros e seu rebanho sempre lendário! 🐄🤠",
+  "Que a vida te dê sempre mais do que o melhor bolo do sertão pode prometer! 🌵🎉",
+  "Que cada dia seja uma nova vaca rara pra adicionar na sua coleção! 🌟🎂",
+  "Que seus pastos sejam verdes, seu rebanho imenso e seus boletos inexistentes! 🤣🎊",
+  "Que o horizonte seja sempre o começo de uma nova aventura, vaqueiro! 🌅🐂",
+];
 
 export class Game {
   private canvas: HTMLCanvasElement;
@@ -404,6 +419,22 @@ export class Game {
   private tradeResultMsg = "";
   private tradeResultTimer = 0;
 
+  // Events
+  private birthdayForceState: "on" | "off" | null = null;
+  private birthdaySentParabens = false;
+  private birthdayParabensCount = 0;
+  private birthdayDialogOpen = false;
+  private birthdayConfirmBtn = { x: 0, y: 0, w: 0, h: 0 };
+  private birthdayCloseBtn = { x: 0, y: 0, w: 0, h: 0 };
+  private cakeBobbingTimer = 0;
+  private birthdayParticles: Array<{
+    x: number; y: number; vx: number; vy: number;
+    color: string; life: number; maxLife: number; size: number;
+  }> = [];
+  private eventPopupDismissed = !!sessionStorage.getItem("cowboy_bday_popup_seen");
+  private eventPopupTimer = 10;
+  private eventPopupCloseBtn = { x: 0, y: 0, w: 0, h: 0 };
+
   // Admin
   private isAdmin = false;
   private adminCmdOpen = false;
@@ -442,6 +473,7 @@ export class Game {
       this.myColor = userData.color;
       this.myName = userData.username;
       this.isAdmin = userData.isAdmin ?? false;
+      this.birthdaySentParabens = !!localStorage.getItem("cowboy_parabens_2025");
       // basedCows é a fonte de verdade — não usa basedCount da DB (pode estar desatualizado)
       this.basedCount = userData.basedCows?.length ?? userData.basedCount;
       this.discovered = new Set(userData.discovered);
@@ -539,8 +571,9 @@ export class Game {
       // Rede multiplayer
       this.network = new Network();
       this.network.connect(userData!.token, {
-        onInit: (id, _color, _name, existing) => {
+        onInit: (id, _color, _name, existing, birthdayCount) => {
           this.myId = id;
+          this.birthdayParabensCount = birthdayCount;
           // color e name já foram carregados do login — não sobrescreve
           for (const p of existing) this.remotePlayers.set(p.id, p);
         },
@@ -644,6 +677,19 @@ export class Game {
           this.choppedTrees.delete(key);
           if (this.map[row]?.[col]) this.map[row]![col]!.decoration = "tree";
         },
+        onPaymentSuccess: (coins) => {
+          this.coins += coins;
+          this.chatMessages.push({
+            id: "system",
+            name: "⚙ Sistema",
+            color: "#FFD700",
+            text: `🎉 Pagamento recebido! +${coins} moedas`,
+            time: Date.now(),
+          });
+        },
+        onBirthdayCount: (count) => {
+          this.birthdayParabensCount = count;
+        },
       });
 
       this.loadPlacedObjects();
@@ -676,6 +722,16 @@ export class Game {
     cancelAnimationFrame(this.rafId);
     this.chatInput?.remove();
     this.adminCmdInput?.remove();
+  }
+
+  addSystemMessage(text: string) {
+    this.chatMessages.push({
+      id: "system",
+      name: "⚙ Sistema",
+      color: "#FFD700",
+      text,
+      time: Date.now(),
+    });
   }
 
   private resize() {
@@ -911,14 +967,271 @@ export class Game {
       ok(`Posição: col=${this.player.col.toFixed(2)}, row=${this.player.row.toFixed(2)}`);
 
     } else if (cmd === "help") {
-      ok("/tp /spawn /godmode /time /setcoins /give /kick /broadcast /players /clearbase /pos");
+      ok("/tp /spawn /godmode /time /setcoins /give /kick /broadcast /players /clearbase /pos /event");
+
+    } else if (cmd === "event") {
+      const sub = (parts[1] ?? "").toLowerCase();
+      if (sub === "list") {
+        ok(`Eventos ativos: ${this.isBirthdayActive ? "birthday" : "nenhum"}`);
+      } else if (sub === "birthday") {
+        const state = (parts[2] ?? "").toLowerCase();
+        if (state === "on") { this.birthdayForceState = "on"; ok("Evento birthday: ON"); }
+        else if (state === "off") { this.birthdayForceState = "off"; ok("Evento birthday: OFF"); }
+        else { err("Uso: /event birthday on|off"); }
+      } else {
+        err("Uso: /event list | /event birthday on|off");
+      }
 
     } else {
       err(`Desconhecido: /${cmd} — use /help`);
     }
   }
 
-  private preloadPlayerSprites() {
+  // ── Evento: Aniversário ─────────────────────────────────────────────────────
+
+  private sendParabens() {
+    if (this.birthdaySentParabens) return;
+    this.birthdaySentParabens = true;
+    localStorage.setItem("cowboy_parabens_2025", "1");
+    const randomMsg = PARABENS_MESSAGES[Math.floor(Math.random() * PARABENS_MESSAGES.length)]!;
+    const fullMsg = `🎂 ${this.myName} deseja: Feliz Aniversário ao criador! ${randomMsg}`;
+    this.network?.sendChat(fullMsg);
+    this.network?.sendBirthdayParabens();
+    this.birthdayDialogOpen = false;
+    this.spawnBirthdayConfetti();
+  }
+
+  private spawnBirthdayConfetti() {
+    const W = this.canvas.width, H = this.canvas.height;
+    const colors = ["#FF6B6B","#FFD700","#6BCB77","#4D96FF","#FF6BD6","#FFA07A","#C77DFF","#00F5D4"];
+    for (let i = 0; i < 80; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 3 + Math.random() * 6;
+      this.birthdayParticles.push({
+        x: W / 2 + (Math.random() - 0.5) * 60,
+        y: H / 2,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed - 4,
+        color: colors[Math.floor(Math.random() * colors.length)]!,
+        life: 1,
+        maxLife: 0.8 + Math.random() * 1.5,
+        size: 3 + Math.random() * 4,
+      });
+    }
+  }
+
+  private drawBirthdayCake() {
+    const { ctx } = this;
+    const t = this.cakeBobbingTimer;
+    const bob = Math.sin(t * 2.2) * 2.5;
+    const glow = 0.55 + Math.sin(t * 3.5) * 0.45;
+    const atCake = this.isAtCake();
+
+    const sx = (CAKE_COL - CAKE_ROW) * (TILE_W / 2) + this.camX;
+    const sy = (CAKE_COL + CAKE_ROW) * (TILE_H / 2) + this.camY + bob - 22;
+
+    ctx.save();
+    ctx.shadowColor = atCake ? "#FFD700" : "#FFB6C1";
+    ctx.shadowBlur = atCake ? 22 * glow : 10 * glow;
+
+    // Plate
+    ctx.fillStyle = "#c8902a";
+    ctx.beginPath();
+    ctx.ellipse(sx, sy + 30, 22, 7, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Bottom tier (chocolate)
+    ctx.fillStyle = "#5C2A0A";
+    ctx.fillRect(sx - 18, sy + 10, 36, 20);
+    ctx.fillStyle = "#FFB6C1";
+    ctx.beginPath();
+    for (let i = -15; i < 18; i += 7) ctx.arc(sx + i, sy + 12, 4, Math.PI, 0);
+    ctx.fill();
+
+    // Middle tier
+    ctx.fillStyle = "#8B1A1A";
+    ctx.fillRect(sx - 13, sy - 2, 26, 14);
+    ctx.fillStyle = "#FFFACD";
+    ctx.beginPath();
+    for (let i = -10; i < 13; i += 7) ctx.arc(sx + i, sy, 3.5, Math.PI, 0);
+    ctx.fill();
+
+    // Top tier
+    ctx.fillStyle = "#D2B48C";
+    ctx.fillRect(sx - 8, sy - 14, 16, 14);
+    ctx.fillStyle = "#FFA07A";
+    ctx.beginPath();
+    for (let i = -5; i < 8; i += 6) ctx.arc(sx + i, sy - 12, 3, Math.PI, 0);
+    ctx.fill();
+
+    // Contador de parabéns
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = "#FFD700";
+    ctx.font = `bold ${this.birthdayParabensCount >= 100 ? "7" : "9"}px sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(String(this.birthdayParabensCount), sx, sy + 20);
+
+    // Candles (3)
+    const candleXs = [-6, 0, 6];
+    const candleColors = ["#FF6B6B", "#6BCB77", "#4D96FF"];
+    for (let ci = 0; ci < 3; ci++) {
+      const cx = sx + candleXs[ci]!;
+      ctx.fillStyle = candleColors[ci]!;
+      ctx.fillRect(cx - 2, sy - 26, 4, 12);
+      const flicker = Math.sin(t * 12 + ci * 2.3) * 1.2;
+      ctx.shadowColor = "#FF8800";
+      ctx.shadowBlur = 7;
+      ctx.fillStyle = "#FF8800";
+      ctx.beginPath();
+      ctx.ellipse(cx + flicker * 0.3, sy - 30, 2.5, 4, flicker * 0.15, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#FFEE44";
+      ctx.beginPath();
+      ctx.ellipse(cx + flicker * 0.2, sy - 31, 1.3, 2.5, flicker * 0.1, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.shadowBlur = 0;
+
+    if (atCake) {
+      ctx.fillStyle = "rgba(0,0,0,0.55)";
+      ctx.beginPath();
+      ctx.roundRect(sx - 62, sy - 56, 124, 20, 4);
+      ctx.fill();
+      ctx.fillStyle = "#FFD700";
+      ctx.font = "bold 10px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("🎂 Pressione E", sx, sy - 46);
+    }
+    ctx.restore();
+  }
+
+  private renderBirthdayParticles() {
+    if (this.birthdayParticles.length === 0) return;
+    const { ctx } = this;
+    ctx.save();
+    for (const p of this.birthdayParticles) {
+      ctx.globalAlpha = Math.max(0, p.life);
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+  }
+
+  private renderEventPopup(W: number, H: number) {
+    if (this.isPreview || this.eventPopupDismissed || !this.isBirthdayActive) return;
+    const { ctx } = this;
+    const PW = Math.min(440, W - 40);
+    const PH = 215;
+    const PX = (W - PW) / 2;
+    const PY = (H - PH) / 2 - 20;
+
+    ctx.save();
+    ctx.fillStyle = "rgba(0,0,0,0.62)";
+    ctx.fillRect(0, 0, W, H);
+    this.drawPanel(PX, PY, PW, PH, 2);
+
+    // Stars row
+    ctx.fillStyle = "#FFD700";
+    ctx.font = "14px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    for (let i = 0; i < 7; i++) ctx.fillText("★", PX + 20 + i * ((PW - 40) / 6), PY + 18);
+
+    ctx.textBaseline = "alphabetic";
+    ctx.fillStyle = "#FFD700";
+    ctx.font = "bold 16px sans-serif";
+    ctx.fillText("🎂 EVENTO ESPECIAL: ANIVERSÁRIO DO CRIADOR!", W / 2, PY + 50);
+    ctx.fillStyle = "#FF9999";
+    ctx.font = "bold 13px sans-serif";
+    ctx.fillText("17 de Março — Feliz Aniversário, Joao! 🎉", W / 2, PY + 72);
+    ctx.fillStyle = "#FFE0A0";
+    ctx.font = "12px sans-serif";
+    ctx.fillText("Um bolo especial apareceu no mapa! 🌵 Encontre e envie", W / 2, PY + 96);
+    ctx.fillText("seus parabéns — todos online vão ver a mensagem! 🤠🐄", W / 2, PY + 114);
+
+    const ratio = Math.max(0, this.eventPopupTimer / 10);
+    ctx.fillStyle = "rgba(30,10,2,0.7)";
+    ctx.fillRect(PX + 20, PY + PH - 34, PW - 40, 10);
+    ctx.fillStyle = "#FFD700";
+    ctx.fillRect(PX + 20, PY + PH - 34, (PW - 40) * ratio, 10);
+    ctx.fillStyle = "#9b7e57";
+    ctx.font = "10px sans-serif";
+    ctx.fillText("Clique em qualquer lugar para fechar", W / 2, PY + PH - 10);
+    ctx.restore();
+  }
+
+  private renderBirthdayDialog(W: number, H: number) {
+    if (!this.birthdayDialogOpen) return;
+    const { ctx } = this;
+    const PW = Math.min(400, W - 40);
+    const PH = 248;
+    const PX = (W - PW) / 2;
+    const PY = (H - PH) / 2;
+
+    ctx.save();
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    ctx.fillRect(0, 0, W, H);
+    this.drawPanel(PX, PY, PW, PH, 2);
+
+    ctx.font = "28px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("🎂", W / 2, PY + 30);
+
+    ctx.textBaseline = "alphabetic";
+    ctx.fillStyle = "#FFD700";
+    ctx.font = "bold 15px sans-serif";
+    ctx.fillText("Bolo de Aniversário do Criador", W / 2, PY + 60);
+    ctx.fillStyle = "#FF9999";
+    ctx.font = "12px sans-serif";
+    ctx.fillText("17 de Março 🎉", W / 2, PY + 78);
+
+    if (this.birthdaySentParabens) {
+      ctx.fillStyle = "#6BCB77";
+      ctx.font = "bold 13px sans-serif";
+      ctx.fillText("🎊 Você já enviou seus parabéns!", W / 2, PY + 112);
+      ctx.fillStyle = "#FFE0A0";
+      ctx.font = "12px sans-serif";
+      ctx.fillText("O criador agradece de coração! 🤠🐄", W / 2, PY + 130);
+
+      const bw = 130, bh = 36;
+      const bx = W / 2 - bw / 2, by = PY + PH - 56;
+      this.birthdayCloseBtn = { x: bx, y: by, w: bw, h: bh };
+      this.birthdayConfirmBtn = { x: 0, y: 0, w: 0, h: 0 };
+      this.drawPixelBtn(bx, by, bw, bh, "normal");
+      ctx.fillStyle = "#FFD700";
+      ctx.font = "bold 13px sans-serif";
+      ctx.fillText("Fechar", W / 2, by + bh / 2 + 5);
+    } else {
+      ctx.fillStyle = "#FFE0A0";
+      ctx.font = "12px sans-serif";
+      ctx.fillText("Envie seus parabéns! Todos online vão ver a mensagem.", W / 2, PY + 106);
+
+      const bw = 210, bh = 40;
+      const bx = W / 2 - bw / 2, by = PY + PH - 100;
+      this.birthdayConfirmBtn = { x: bx, y: by, w: bw, h: bh };
+      this.drawPixelBtn(bx, by, bw, bh, "normal");
+      ctx.fillStyle = "#FFD700";
+      ctx.font = "bold 14px sans-serif";
+      ctx.fillText("🎂 Enviar Parabéns!", W / 2, by + bh / 2 + 5);
+
+      const cw = 120, ch = 32;
+      const cxb = W / 2 - cw / 2, cyb = PY + PH - 48;
+      this.birthdayCloseBtn = { x: cxb, y: cyb, w: cw, h: ch };
+      this.drawPixelBtn(cxb, cyb, cw, ch, "normal");
+      ctx.fillStyle = "#C8A870";
+      ctx.font = "13px sans-serif";
+      ctx.fillText("Talvez depois", W / 2, cyb + ch / 2 + 4);
+    }
+    ctx.restore();
+  }
+
+private preloadPlayerSprites() {
     const dirs = [
       "north",
       "north-east",
@@ -1116,6 +1429,29 @@ export class Game {
       return;
     }
 
+
+    // Event popup: any click dismisses it
+    if (!this.eventPopupDismissed && this.isBirthdayActive) {
+      this.eventPopupDismissed = true;
+      sessionStorage.setItem("cowboy_bday_popup_seen", "1");
+      return;
+    }
+
+    // Birthday dialog buttons
+    if (this.birthdayDialogOpen) {
+      const cb = this.birthdayCloseBtn;
+      if (cb.w > 0 && x >= cb.x && x <= cb.x + cb.w && y >= cb.y && y <= cb.y + cb.h) {
+        this.birthdayDialogOpen = false;
+        return;
+      }
+      const conf = this.birthdayConfirmBtn;
+      if (conf.w > 0 && x >= conf.x && x <= conf.x + conf.w && y >= conf.y && y <= conf.y + conf.h) {
+        this.sendParabens();
+        return;
+      }
+      return;
+    }
+
     // Shop interaction
     if (this.shopOpen) {
       // Close button
@@ -1281,9 +1617,19 @@ export class Game {
         return;
       }
     } else {
-      // Collapse button: drawPixelBtn(196, 10, 26, 26)
-      if (x >= 192 && x <= 228 && y >= 6 && y <= 40) {
+      // Collapse button: PW=210, drawPixelBtn(PW-20, 9, 22, 22)
+      if (x >= 190 && x <= 216 && y >= 6 && y <= 34) {
         this.statsMinimized = true;
+        return;
+      }
+      // Logout button: drawPixelBtn(PW-46, 9, 22, 22) → x=164..186
+      if (x >= 164 && x <= 190 && y >= 6 && y <= 34) {
+        void this.saveAndLogout();
+        return;
+      }
+      // Botão "Comprar Moedas": x=14..204, y=154..176 (ry=148 fixo)
+      if (x >= 14 && x <= 204 && y >= 154 && y <= 176) {
+        void buyPremium(this.myToken);
         return;
       }
     }
@@ -1631,6 +1977,16 @@ export class Game {
       this.activeBench = null;
       return;
     }
+    // Birthday dialog dismiss via E
+    if (this.birthdayDialogOpen) {
+      this.birthdayDialogOpen = false;
+      return;
+    }
+    // Birthday cake interaction
+    if (this.isBirthdayActive && this.isAtCake()) {
+      this.birthdayDialogOpen = true;
+      return;
+    }
     if (this.shopOpen) {
       this.shopOpen = false;
       return;
@@ -1832,8 +2188,26 @@ export class Game {
     // Trade result timer
     if (this.tradeState === "result" && this.tradeResultTimer > 0) {
       this.tradeResultTimer -= dt;
-      if (this.adminCmdResultTimer > 0) this.adminCmdResultTimer -= dt;
       if (this.tradeResultTimer <= 0) this.tradeState = "idle";
+    }
+    if (this.adminCmdResultTimer > 0) this.adminCmdResultTimer -= dt;
+
+    // Birthday event timers
+    this.cakeBobbingTimer += dt;
+    if (!this.eventPopupDismissed && this.isBirthdayActive) {
+      this.eventPopupTimer -= dt;
+      if (this.eventPopupTimer <= 0) {
+        this.eventPopupDismissed = true;
+        sessionStorage.setItem("cowboy_bday_popup_seen", "1");
+      }
+    }
+    for (let i = this.birthdayParticles.length - 1; i >= 0; i--) {
+      const p = this.birthdayParticles[i]!;
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vy += 0.12;
+      p.life -= dt / p.maxLife;
+      if (p.life <= 0) this.birthdayParticles.splice(i, 1);
     }
 
     // Envio de posição para outros jogadores (20 vezes/seg)
@@ -1931,6 +2305,27 @@ export class Game {
       this.coins,
       inventory,
     );
+  }
+
+  private async saveAndLogout() {
+    const discovered = [...this.discovered];
+    const discoveredNPCs = [...this.discoveredNPCs];
+    const capturedByType = Object.fromEntries(this.capturedByType);
+    const basedCowTypes = this.cows
+      .filter((c) => c.state === "based")
+      .map((c) => c.type.id);
+    const inventory = Object.fromEntries(this.inventory);
+    await saveGameState(
+      this.myToken,
+      this.basedCount,
+      discovered,
+      discoveredNPCs,
+      capturedByType,
+      basedCowTypes,
+      this.coins,
+      inventory,
+    );
+    logout();
   }
 
   private updateStake(dt: number) {
@@ -2289,6 +2684,19 @@ export class Game {
 
   private get isNight(): boolean {
     return this.timePeriod === "noite";
+  }
+
+  private get isBirthdayActive(): boolean {
+    if (this.birthdayForceState === "off") return false;
+    if (this.birthdayForceState === "on") return true;
+    const now = new Date();
+    const m = now.getMonth() + 1;
+    const d = now.getDate();
+    return m === BIRTHDAY_MONTH && d >= BIRTHDAY_DAY_START && d <= BIRTHDAY_DAY_END;
+  }
+
+  private isAtCake(): boolean {
+    return dist(this.player, { col: CAKE_COL, row: CAKE_ROW }) <= CAKE_INTERACT_DIST;
   }
 
   private get effectiveHerdCapacity() {
@@ -3378,6 +3786,14 @@ export class Game {
       draw: () => this.drawVendorNPC(),
     });
 
+    // Bolo de aniversário (evento)
+    if (this.isBirthdayActive) {
+      items.push({
+        depth: CAKE_COL + CAKE_ROW - 0.3,
+        draw: () => this.drawBirthdayCake(),
+      });
+    }
+
     for (const cow of this.cows) {
       const c = cow;
       items.push({
@@ -4404,6 +4820,11 @@ export class Game {
     }
 
     if (this.isAdmin) this.renderAdminOverlay(W, H);
+
+    // Birthday event
+    this.renderBirthdayParticles();
+    if (this.birthdayDialogOpen) this.renderBirthdayDialog(W, H);
+    if (!this.eventPopupDismissed) this.renderEventPopup(W, H);
   }
 
   // ── Admin overlay ─────────────────────────────────────────────────────────
@@ -4540,9 +4961,9 @@ export class Game {
         (it) => (this.inventory.get(it.id) ?? 0) > 0,
       );
       const PW = 210;
-      // Base: cabeçalho(30) + 3 stats(60) + período(20) + moedas(20) + padding(16) = 146
+      // Base: cabeçalho(30) + 3 stats(60) + período(20) + moedas(20) + botãoPremium(28) + padding(16) = 174
       const PH =
-        146 + (ownedItems.length > 0 ? 34 : 0) + (this.leiteTimer > 0 ? 20 : 0);
+        174 + (ownedItems.length > 0 ? 34 : 0) + (this.leiteTimer > 0 ? 20 : 0);
       this.drawPanel(6, 6, PW, PH, 0);
 
       // Cabeçalho: cor + nome do jogador
@@ -4620,6 +5041,22 @@ export class Game {
       ctx.fillText(`${this.coins}`, PW - 10, ry);
       ry += 20;
 
+      // Botão "Comprar Moedas" (Stripe)
+      {
+        const btnX = 14;
+        const btnY = ry;
+        const btnW = PW - 20;
+        const btnH = 22;
+        this.drawPixelBtn(btnX, btnY, btnW, btnH, "normal");
+        ctx.fillStyle = "#FFD700";
+        ctx.font = "bold 11px sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("💳  Comprar Moedas  R$10", btnX + btnW / 2, btnY + btnH / 2);
+        ctx.textBaseline = "alphabetic";
+        ry += 28;
+      }
+
       // Leite Fluorescente timer
       if (this.leiteTimer > 0) {
         const totalSecs = Math.ceil(this.leiteTimer);
@@ -4635,6 +5072,15 @@ export class Game {
           ry,
         );
       }
+
+      // Botão logout
+      this.drawPixelBtn(PW - 46, 9, 22, 22, "normal");
+      ctx.fillStyle = "#FF7777";
+      ctx.font = "bold 11px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("⏻", PW - 35, 20);
+      ctx.textBaseline = "alphabetic";
 
       // Botão recolher
       this.drawPixelBtn(PW - 20, 9, 22, 22, "normal");
@@ -5502,6 +5948,8 @@ export class Game {
       hint = isMobile ? "Botão: Abrir Loja!" : "Pressione E / botão para abrir a LOJA!";
     else if (atBase && hasHerd)
       hint = isMobile ? "Botão: Depositar na base!" : "Pressione E / botão para DEPOSITAR na base!";
+    else if (this.isBirthdayActive && this.isAtCake())
+      hint = isMobile ? "🎂 Botão: Interagir com o bolo!" : "🎂 Pressione E para interagir com o BOLO DE ANIVERSÁRIO!";
     else if (nearest && dist(this.player, nearest) <= CAPTURE_DIST)
       hint = isMobile ? "Botão: Laçar vaca!" : "Pressione E / botão para LAÇAR a vaca!";
 
