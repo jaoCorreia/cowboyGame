@@ -32,6 +32,7 @@ export const COW_TYPES: CowType[] = [
     renderStyle: 'normal',
     description: 'A clássica vaca do sertão. Mansinha e fácil de laçar.',
     fearDistance: 0, fearSpeed: 0,
+    sprite: 'cows/default_cow.png',
   },
   {
     id: 'caramelo',

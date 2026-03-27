@@ -11,6 +11,7 @@ export interface UserData {
   basedCows: string[]; // IDs dos tipos de vaca na base
   coins: number;
   inventory: Record<string, number>; // itemId → level
+  isAdmin?: boolean;
 }
 
 const TOKEN_KEY = "cowboy_token";

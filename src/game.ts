@@ -404,6 +404,15 @@ export class Game {
   private tradeResultMsg = "";
   private tradeResultTimer = 0;
 
+  // Admin
+  private isAdmin = false;
+  private adminCmdOpen = false;
+  private adminCmdInput?: HTMLInputElement;
+  private adminCmdResult = "";
+  private adminCmdResultTimer = 0;
+  private adminGodMode = false;
+  private adminForcePeriod: "manha" | "tarde" | "noite" | null = null;
+
   // Stake (grappling hook)
   private stake: StakeData = {
     phase: "idle",
@@ -432,6 +441,7 @@ export class Game {
       this.myToken = userData.token;
       this.myColor = userData.color;
       this.myName = userData.username;
+      this.isAdmin = userData.isAdmin ?? false;
       // basedCows é a fonte de verdade — não usa basedCount da DB (pode estar desatualizado)
       this.basedCount = userData.basedCows?.length ?? userData.basedCount;
       this.discovered = new Set(userData.discovered);
@@ -519,6 +529,7 @@ export class Game {
 
     this.statsMinimized = window.innerWidth < 500;
     if (!this.isPreview) this.setupChatInput();
+    if (!this.isPreview && this.isAdmin) this.setupAdminInput();
     this.setupInput();
     this.resize();
     window.addEventListener("resize", () => this.resize());
@@ -664,6 +675,7 @@ export class Game {
   destroy() {
     cancelAnimationFrame(this.rafId);
     this.chatInput?.remove();
+    this.adminCmdInput?.remove();
   }
 
   private resize() {
@@ -730,6 +742,182 @@ export class Game {
     this.chatInput.style.display = "none";
   }
 
+  // ─── Admin command bar ────────────────────────────────────────────────────
+
+  private setupAdminInput() {
+    const input = document.createElement("input");
+    input.type = "text";
+    input.placeholder = "Comando admin... (Enter=executar, Esc=fechar, /help)";
+    input.maxLength = 300;
+    Object.assign(input.style, {
+      position: "fixed",
+      bottom: "10px",
+      left: "10px",
+      width: "calc(100% - 20px)",
+      padding: "8px 12px",
+      background: "rgba(40,3,3,0.96)",
+      border: "2px solid #cc2222",
+      borderRadius: "4px",
+      color: "#FF9980",
+      font: "bold 13px monospace",
+      outline: "none",
+      display: "none",
+      zIndex: "20",
+      boxSizing: "border-box",
+    });
+    input.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter") {
+        const text = input.value.trim();
+        if (text) this.executeAdminCmd(text);
+        input.value = "";
+        this.closeAdminCmd();
+      } else if (e.key === "Escape" || e.key === "`") {
+        this.closeAdminCmd();
+        e.preventDefault();
+      }
+    });
+    document.body.appendChild(input);
+    this.adminCmdInput = input;
+  }
+
+  private openAdminCmd() {
+    if (!this.adminCmdInput) return;
+    this.adminCmdOpen = true;
+    this.adminCmdInput.style.display = "block";
+    this.adminCmdInput.value = "";
+    this.adminCmdInput.focus();
+  }
+
+  private closeAdminCmd() {
+    if (!this.adminCmdInput) return;
+    this.adminCmdOpen = false;
+    this.adminCmdInput.style.display = "none";
+  }
+
+  private executeAdminCmd(raw: string) {
+    const parts = raw.trim().split(/\s+/);
+    const cmd = (parts[0] ?? "").toLowerCase().replace(/^\//, "");
+
+    const ok = (msg: string) => {
+      this.adminCmdResult = `✅ ${msg}`;
+      this.adminCmdResultTimer = 3;
+    };
+    const err = (msg: string) => {
+      this.adminCmdResult = `❌ ${msg}`;
+      this.adminCmdResultTimer = 3;
+    };
+
+    if (cmd === "tp" || cmd === "teleport") {
+      const col = parseFloat(parts[1] ?? "");
+      const row = parseFloat(parts[2] ?? "");
+      if (isNaN(col) || isNaN(row)) { err("Uso: /tp <col> <row>"); return; }
+      this.player.col = Math.max(0, Math.min(MAP_COLS - 1, col));
+      this.player.row = Math.max(0, Math.min(MAP_ROWS - 1, row));
+      ok(`Teletransportado para (${col}, ${row})`);
+
+    } else if (cmd === "spawn") {
+      const cow = spawnCow(this.nextCowId++, this.map, this.isNight);
+      cow.col = this.player.col + 2;
+      cow.row = this.player.row + 2;
+      this.cows.push(cow);
+      ok(`Vaca spawned: ${cow.type.id} em (${cow.col.toFixed(1)}, ${cow.row.toFixed(1)})`);
+
+    } else if (cmd === "godmode" || cmd === "god") {
+      this.adminGodMode = !this.adminGodMode;
+      ok(`God mode: ${this.adminGodMode ? "ON" : "OFF"}`);
+
+    } else if (cmd === "time") {
+      const period = (parts[1] ?? "").toLowerCase();
+      if (period === "day" || period === "dia" || period === "manha") {
+        this.adminForcePeriod = "manha";
+        ok("Hora forçada: manhã");
+      } else if (period === "afternoon" || period === "tarde") {
+        this.adminForcePeriod = "tarde";
+        ok("Hora forçada: tarde");
+      } else if (period === "night" || period === "noite") {
+        this.adminForcePeriod = "noite";
+        ok("Hora forçada: noite");
+      } else if (period === "real" || period === "auto" || period === "reset") {
+        this.adminForcePeriod = null;
+        ok("Hora: automático");
+      } else {
+        err("Uso: /time <manha|tarde|noite|real>");
+      }
+
+    } else if (cmd === "setcoins") {
+      const amount = parseInt(parts[1] ?? "");
+      if (isNaN(amount) || amount < 0) { err("Uso: /setcoins <amount>"); return; }
+      this.coins = amount;
+      ok(`Coins definido: ${amount}`);
+
+    } else if (cmd === "give") {
+      const maybeNum = parseInt(parts[1] ?? "");
+      if (!isNaN(maybeNum)) {
+        this.coins += maybeNum;
+        ok(`+${maybeNum} coins (total: ${this.coins})`);
+      } else {
+        const username = parts[1] ?? "";
+        const amount = parseInt(parts[2] ?? "");
+        if (!username || isNaN(amount)) { err("Uso: /give <amount> ou /give <username> <amount>"); return; }
+        fetch("/admin/cmd", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token: this.myToken, command: "give_coins", username, amount }),
+        }).then((r) => r.json()).then((d: { ok?: boolean; error?: string }) => {
+          if (d.ok) { this.adminCmdResult = `✅ +${amount} coins → ${username}`; this.adminCmdResultTimer = 3; }
+          else { this.adminCmdResult = `❌ ${d.error ?? "Erro"}`; this.adminCmdResultTimer = 3; }
+        }).catch(() => { this.adminCmdResult = "❌ Erro de conexão"; this.adminCmdResultTimer = 3; });
+        ok(`Enviando ${amount} coins para ${username}...`);
+      }
+
+    } else if (cmd === "kick") {
+      const username = parts.slice(1).join(" ");
+      if (!username) { err("Uso: /kick <username>"); return; }
+      fetch("/admin/cmd", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: this.myToken, command: "kick", username }),
+      }).then((r) => r.json()).then((d: { ok?: boolean; error?: string }) => {
+        if (d.ok) { this.adminCmdResult = `✅ ${username} kickado`; this.adminCmdResultTimer = 3; }
+        else { this.adminCmdResult = `❌ ${d.error ?? "Erro"}`; this.adminCmdResultTimer = 3; }
+      }).catch(() => { this.adminCmdResult = "❌ Erro de conexão"; this.adminCmdResultTimer = 3; });
+      ok(`Kickando ${username}...`);
+
+    } else if (cmd === "broadcast" || cmd === "bc") {
+      const text = parts.slice(1).join(" ");
+      if (!text) { err("Uso: /broadcast <mensagem>"); return; }
+      fetch("/admin/cmd", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: this.myToken, command: "broadcast", text }),
+      }).then((r) => r.json()).then((d: { ok?: boolean; error?: string }) => {
+        if (d.ok) { this.adminCmdResult = "✅ Broadcast enviado"; this.adminCmdResultTimer = 3; }
+        else { this.adminCmdResult = `❌ ${d.error ?? "Erro"}`; this.adminCmdResultTimer = 3; }
+      }).catch(() => { this.adminCmdResult = "❌ Erro de conexão"; this.adminCmdResultTimer = 3; });
+      ok("Enviando broadcast...");
+
+    } else if (cmd === "players") {
+      const names = [...this.remotePlayers.values()].map((p) => p.name).join(", ");
+      ok(`Online: ${names || "nenhum outro jogador"}`);
+
+    } else if (cmd === "clearbase") {
+      const based = this.cows.filter((c) => c.state === "based");
+      for (const c of based) this.cows.splice(this.cows.indexOf(c), 1);
+      this.basedCount = 0;
+      ok(`Base limpa: ${based.length} vacas removidas`);
+
+    } else if (cmd === "pos") {
+      ok(`Posição: col=${this.player.col.toFixed(2)}, row=${this.player.row.toFixed(2)}`);
+
+    } else if (cmd === "help") {
+      ok("/tp /spawn /godmode /time /setcoins /give /kick /broadcast /players /clearbase /pos");
+
+    } else {
+      err(`Desconhecido: /${cmd} — use /help`);
+    }
+  }
+
   private preloadPlayerSprites() {
     const dirs = [
       "north",
@@ -759,7 +947,14 @@ export class Game {
 
   private setupInput() {
     window.addEventListener("keydown", (e) => {
-      if (this.isPreview || this.chatOpen) return;
+      // Backtick toggles admin command bar (before other guards)
+      if (this.isAdmin && (e.key === "`" || e.key === "~")) {
+        if (this.adminCmdOpen) this.closeAdminCmd();
+        else this.openAdminCmd();
+        e.preventDefault();
+        return;
+      }
+      if (this.isPreview || this.chatOpen || this.adminCmdOpen) return;
       this.keys.add(e.key.toLowerCase());
       if (e.key === " " || e.key.toLowerCase() === "e") this.handleAction();
       if (e.key.toLowerCase() === "b") this.toggleBook();
@@ -1637,6 +1832,7 @@ export class Game {
     // Trade result timer
     if (this.tradeState === "result" && this.tradeResultTimer > 0) {
       this.tradeResultTimer -= dt;
+      if (this.adminCmdResultTimer > 0) this.adminCmdResultTimer -= dt;
       if (this.tradeResultTimer <= 0) this.tradeState = "idle";
     }
 
@@ -1970,11 +2166,16 @@ export class Game {
         return;
       }
       if (l.timeLeft <= 0) {
-        l.phase = "fail";
-        l.cow.state = "fleeing";
-        setTimeout(() => {
-          this.lasso.active = false;
-        }, 700);
+        if (this.adminGodMode) {
+          this.captureCow(l.cow);
+          l.active = false;
+        } else {
+          l.phase = "fail";
+          l.cow.state = "fleeing";
+          setTimeout(() => {
+            this.lasso.active = false;
+          }, 700);
+        }
       }
     }
   }
@@ -2060,6 +2261,7 @@ export class Game {
 
   /** 'manha' 6-12h | 'tarde' 12-18h | 'noite' 18-6h (horário de Brasília) */
   private get timePeriod(): "manha" | "tarde" | "noite" {
+    if (this.adminForcePeriod !== null) return this.adminForcePeriod;
     if (this.DEBUG_FORCE_PERIOD !== null) return this.DEBUG_FORCE_PERIOD;
     const h = this.realHourBRT;
     if (h >= 18 || h < 6) return "noite";
@@ -2069,6 +2271,8 @@ export class Game {
 
   /** 0 = dia pleno, 1 = noite plena — transição suave de 30 min */
   private get nightFade(): number {
+    if (this.adminForcePeriod === "noite") return 1;
+    if (this.adminForcePeriod !== null) return 0;
     if (this.DEBUG_FORCE_PERIOD === "noite") return 1;
     if (this.DEBUG_FORCE_PERIOD === "tarde") return 0;
     if (this.DEBUG_FORCE_PERIOD === "manha") return 0;
@@ -4197,6 +4401,104 @@ export class Game {
         132,
       );
       this.ctx.fillText("Q = Estaca (cruzar rio)", W - 115, 149);
+    }
+
+    if (this.isAdmin) this.renderAdminOverlay(W, H);
+  }
+
+  // ── Admin overlay ─────────────────────────────────────────────────────────
+
+  private renderAdminOverlay(W: number, H: number) {
+    const { ctx } = this;
+
+    // Badge "⚙ ADMIN" no canto superior direito (abaixo dos botões)
+    ctx.save();
+    ctx.font = "bold 11px monospace";
+    const badge = "⚙ ADMIN";
+    const bw = ctx.measureText(badge).width + 14;
+    const bx = W - bw - 6;
+    const by = 6;
+    ctx.fillStyle = "rgba(80,5,5,0.88)";
+    ctx.fillRect(bx, by, bw, 20);
+    ctx.strokeStyle = "#cc2222";
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(bx, by, bw, 20);
+    ctx.fillStyle = "#FF6666";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(badge, bx + bw / 2, by + 10);
+    ctx.textBaseline = "alphabetic";
+    ctx.restore();
+
+    // Indicador de god mode
+    if (this.adminGodMode) {
+      ctx.save();
+      ctx.font = "bold 11px monospace";
+      ctx.fillStyle = "rgba(80,5,5,0.88)";
+      const gw = ctx.measureText("⚡ GOD MODE").width + 14;
+      ctx.fillRect(W - gw - 6, 30, gw, 20);
+      ctx.strokeStyle = "#cc2222";
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(W - gw - 6, 30, gw, 20);
+      ctx.fillStyle = "#FFAA44";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("⚡ GOD MODE", W - gw / 2 - 6, 40);
+      ctx.textBaseline = "alphabetic";
+      ctx.restore();
+    }
+
+    // Indicador de hora forçada
+    if (this.adminForcePeriod !== null) {
+      ctx.save();
+      ctx.font = "bold 10px monospace";
+      const label = `🕐 TIME:${this.adminForcePeriod.toUpperCase()}`;
+      const tw = ctx.measureText(label).width + 14;
+      const ty = this.adminGodMode ? 54 : 30;
+      ctx.fillStyle = "rgba(5,5,80,0.88)";
+      ctx.fillRect(W - tw - 6, ty, tw, 20);
+      ctx.strokeStyle = "#2244cc";
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(W - tw - 6, ty, tw, 20);
+      ctx.fillStyle = "#88AAFF";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(label, W - tw / 2 - 6, ty + 10);
+      ctx.textBaseline = "alphabetic";
+      ctx.restore();
+    }
+
+    // Resultado do último comando
+    if (this.adminCmdResultTimer > 0 && this.adminCmdResult) {
+      const alpha = Math.min(1, this.adminCmdResultTimer);
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.font = "bold 13px monospace";
+      const msg = this.adminCmdResult;
+      const tw = ctx.measureText(msg).width + 16;
+      const px = 10;
+      const py = H - 40;
+      ctx.fillStyle = "rgba(40,3,3,0.94)";
+      ctx.fillRect(px, py - 18, tw, 24);
+      ctx.strokeStyle = "#cc2222";
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(px, py - 18, tw, 24);
+      ctx.fillStyle = this.adminCmdResult.startsWith("✅") ? "#88FF88" : "#FF8888";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.fillText(msg, px + 8, py - 6);
+      ctx.textBaseline = "alphabetic";
+      ctx.restore();
+    }
+
+    // Dica de atalho (quando nenhum painel está aberto)
+    if (!this.adminCmdOpen && !this.shopOpen && !this.bookOpen && !this.inventoryOpen) {
+      ctx.save();
+      ctx.font = "10px monospace";
+      ctx.fillStyle = "rgba(255,100,100,0.5)";
+      ctx.textAlign = "left";
+      ctx.fillText("` = admin cmd", 10, H - 16);
+      ctx.restore();
     }
   }
 

@@ -49,6 +49,9 @@ await users.createIndex(
   { unique: true, collation: { locale: "en", strength: 2 } },
 );
 
+// Usernames that have admin privileges (case-insensitive)
+const ADMIN_USERNAMES = new Set(["admin", "joao"]);
+
 interface UserDoc {
   _id: ObjectId;
   username: string;
@@ -67,6 +70,7 @@ interface Session {
   userId: string;
   username: string;
   color: string;
+  isAdmin: boolean;
 }
 const sessions = new Map<string, Session>();
 
@@ -176,7 +180,8 @@ server = Bun.serve<WsData>({
 
       const newUserId = result.insertedId.toString();
       const token = crypto.randomUUID();
-      sessions.set(token, { userId: newUserId, username, color });
+      const isAdmin = ADMIN_USERNAMES.has(username.toLowerCase());
+      sessions.set(token, { userId: newUserId, username, color, isAdmin });
       activeTokenByUserId.set(newUserId, token);
       return Response.json({
         token,
@@ -189,6 +194,7 @@ server = Bun.serve<WsData>({
         basedCows: [],
         coins: 0,
         inventory: {},
+        isAdmin,
       });
     },
 
@@ -236,10 +242,12 @@ server = Bun.serve<WsData>({
       }
 
       const token = crypto.randomUUID();
+      const isAdminLogin = ADMIN_USERNAMES.has(row.username.toLowerCase());
       sessions.set(token, {
         userId: loginUserId,
         username: row.username,
         color: row.color,
+        isAdmin: isAdminLogin,
       });
       activeTokenByUserId.set(loginUserId, token);
       return Response.json({
@@ -253,6 +261,7 @@ server = Bun.serve<WsData>({
         basedCows: row.basedCows ?? [],
         coins: row.coins ?? 0,
         inventory: row.inventory ?? {},
+        isAdmin: isAdminLogin,
       });
     },
 
@@ -284,7 +293,84 @@ server = Bun.serve<WsData>({
         basedCows: row.basedCows ?? [],
         coins: row.coins ?? 0,
         inventory: row.inventory ?? {},
+        isAdmin: sess.isAdmin,
       });
+    },
+
+    // ── Admin Commands ────────────────────────────────────────────────────────
+
+    "/admin/cmd": async (req: Request) => {
+      if (req.method !== "POST")
+        return new Response("Method Not Allowed", { status: 405 });
+      const body = (await req.json()) as {
+        token?: string;
+        command?: string;
+        username?: string;
+        amount?: number;
+        text?: string;
+      };
+      const sess = sessions.get(body.token ?? "");
+      if (!sess || !sess.isAdmin)
+        return Response.json({ error: "Forbidden" }, { status: 403 });
+
+      const { command } = body;
+
+      if (command === "give_coins") {
+        const { username, amount } = body;
+        if (!username || typeof amount !== "number")
+          return Response.json({ error: "username e amount obrigatórios" }, { status: 400 });
+        const result = await users.updateOne(
+          { username },
+          { $inc: { coins: Math.floor(amount) } },
+          { collation: { locale: "en", strength: 2 } },
+        );
+        if (result.matchedCount === 0)
+          return Response.json({ error: "Usuário não encontrado" }, { status: 404 });
+        return Response.json({ ok: true });
+      }
+
+      if (command === "kick") {
+        const { username } = body;
+        if (!username)
+          return Response.json({ error: "username obrigatório" }, { status: 400 });
+        let kicked = false;
+        for (const [, p] of players) {
+          if (p.name.toLowerCase() === username.toLowerCase()) {
+            for (const [, ws] of activeWsByUserId) {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              if ((ws as any).data?.id === p.id) {
+                try { ws.send(JSON.stringify({ type: "kicked" })); } catch { /**/ }
+                try { ws.close(); } catch { /**/ }
+                kicked = true;
+                break;
+              }
+            }
+            break;
+          }
+        }
+        return kicked
+          ? Response.json({ ok: true })
+          : Response.json({ error: "Jogador não encontrado online" }, { status: 404 });
+      }
+
+      if (command === "broadcast") {
+        const text = body.text;
+        if (!text)
+          return Response.json({ error: "text obrigatório" }, { status: 400 });
+        server.publish(
+          "game",
+          JSON.stringify({
+            type: "chat",
+            id: "system",
+            name: "⚙ Sistema",
+            color: "#FF4444",
+            text: String(text).slice(0, 200),
+          }),
+        );
+        return Response.json({ ok: true });
+      }
+
+      return Response.json({ error: "Comando desconhecido" }, { status: 400 });
     },
 
     // ── Placed Objects ────────────────────────────────────────────────────────
