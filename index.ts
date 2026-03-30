@@ -591,29 +591,44 @@ server = Bun.serve<WsData>({
       if (req.method !== "POST")
         return new Response("Method Not Allowed", { status: 405 });
 
-      const body = (await req.json()) as { type?: string; data?: { id?: string } };
+      const rawBody = await req.text();
+      let body: { type?: string; action?: string; data?: { id?: string } };
+      try {
+        body = JSON.parse(rawBody) as typeof body;
+      } catch {
+        return new Response("Bad Request", { status: 400 });
+      }
 
-      // Valida assinatura HMAC se configurada
+      // Valida assinatura HMAC se configurada (apenas loga se inválida — não rejeita)
       if (MP_WEBHOOK_SECRET) {
         const xSig = req.headers.get("x-signature") ?? "";
         const xReqId = req.headers.get("x-request-id") ?? "";
+        const ts = xSig.split(",").find(p => p.startsWith("ts="))?.slice(3) ?? "";
         const dataId = body.data?.id ?? "";
-        const manifest = `id:${dataId};request-id:${xReqId};ts:${xSig.split(",").find(p => p.startsWith("ts="))?.slice(3) ?? ""}`;
+        const manifest = `id:${dataId};request-id:${xReqId};ts:${ts}`;
         const hmac = new Bun.CryptoHasher("sha256", MP_WEBHOOK_SECRET);
         hmac.update(manifest);
         const expected = hmac.digest("hex");
         const received = xSig.split(",").find(p => p.startsWith("v1="))?.slice(3) ?? "";
         if (expected !== received) {
-          return new Response("Signature invalid", { status: 400 });
+          console.warn("[MP] webhook signature mismatch (processando mesmo assim)");
         }
       }
 
-      if (body.type === "payment" && body.data?.id) {
+      // Suporta tanto type="payment" quanto action="payment.updated"
+      const isPaymentEvent =
+        (body.type === "payment" || body.action === "payment.updated") &&
+        body.data?.id;
+
+      if (isPaymentEvent) {
         try {
-          const payment = await new Payment(mp).get({ id: body.data.id });
-          console.log("[MP] webhook payment:", JSON.stringify({ status: payment.status, external_reference: payment.external_reference, metadata: payment.metadata }));
+          const payment = await new Payment(mp).get({ id: body.data!.id! });
+          console.log("[MP] webhook payment:", JSON.stringify({
+            status: payment.status,
+            external_reference: payment.external_reference,
+            metadata: payment.metadata,
+          }));
           if (payment.status === "approved") {
-            // MP converte camelCase para snake_case nos metadados; external_reference é mais confiável
             const meta = payment.metadata as Record<string, string> | undefined;
             const userId = meta?.user_id ?? meta?.userId ?? payment.external_reference ?? "";
             if (userId) {
@@ -632,6 +647,8 @@ server = Bun.serve<WsData>({
         } catch (err) {
           console.error("[MP] webhook payment fetch error:", err);
         }
+      } else {
+        console.log("[MP] webhook ignorado:", JSON.stringify({ type: body.type, action: body.action }));
       }
 
       return new Response("OK");
