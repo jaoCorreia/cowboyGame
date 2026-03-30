@@ -5,6 +5,7 @@ import index from "./index.html";
 
 const mp = new MercadoPagoConfig({ accessToken: process.env.MP_ACCESS_TOKEN! });
 const MP_WEBHOOK_SECRET = process.env.MP_WEBHOOK_SECRET ?? "";
+const APP_URL = process.env.APP_URL ?? ""; // ex: https://seudominio.com
 
 const MONGO_URI = process.env.MONGO_URI;
 if (!MONGO_URI) throw new Error("MONGO_URI environment variable is not set");
@@ -557,10 +558,13 @@ server = Bun.serve<WsData>({
       try {
         const preference = await new Preference(mp).create({
           body: {
+            external_reference: sess.userId,
             items: [
               {
                 id: "coins_500",
                 title: "500 moedas — Cowboy Game",
+                description: "Pacote de 500 moedas para usar na loja do Cowboy Game",
+                category_id: "entertainment",
                 quantity: 1,
                 unit_price: 10,
                 currency_id: "BRL",
@@ -572,7 +576,7 @@ server = Bun.serve<WsData>({
               failure: `${origin}/?payment=cancelled`,
               pending: `${origin}/?payment=pending`,
             },
-            ...(origin.startsWith("https://") ? { notification_url: `${origin}/mp/webhook` } : {}),
+            ...(APP_URL ? { notification_url: `${APP_URL}/mp/webhook` } : {}),
           },
         });
         return Response.json({ url: preference.init_point });
@@ -607,8 +611,11 @@ server = Bun.serve<WsData>({
       if (body.type === "payment" && body.data?.id) {
         try {
           const payment = await new Payment(mp).get({ id: body.data.id });
+          console.log("[MP] webhook payment:", JSON.stringify({ status: payment.status, external_reference: payment.external_reference, metadata: payment.metadata }));
           if (payment.status === "approved") {
-            const userId = (payment.metadata as Record<string, string> | undefined)?.userId;
+            // MP converte camelCase para snake_case nos metadados; external_reference é mais confiável
+            const meta = payment.metadata as Record<string, string> | undefined;
+            const userId = meta?.user_id ?? meta?.userId ?? payment.external_reference ?? "";
             if (userId) {
               await users.updateOne(
                 { _id: new ObjectId(userId) },
