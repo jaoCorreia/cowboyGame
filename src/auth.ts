@@ -182,7 +182,7 @@ function buildOverlay(resolve: (d: UserData) => void): HTMLElement {
 
 export async function buyPremium(token: string): Promise<void> {
   try {
-    const res = await fetch("/stripe/checkout", {
+    const res = await fetch("/mp/checkout", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ token }),
@@ -192,7 +192,7 @@ export async function buyPremium(token: string): Promise<void> {
     try {
       data = JSON.parse(text) as { url?: string; error?: string };
     } catch {
-      console.error("[Stripe] resposta não-JSON:", text);
+      console.error("[MP] resposta não-JSON:", text);
       alert("Erro de servidor: " + text.slice(0, 200));
       return;
     }
@@ -202,7 +202,7 @@ export async function buyPremium(token: string): Promise<void> {
       alert(data.error ?? "Erro ao iniciar pagamento.");
     }
   } catch (err) {
-    console.error("[Stripe] fetch error:", err);
+    console.error("[MP] fetch error:", err);
     alert("Erro de conexão ao iniciar pagamento.");
   }
 }

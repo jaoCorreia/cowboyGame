@@ -5041,7 +5041,7 @@ private preloadPlayerSprites() {
       ctx.fillText(`${this.coins}`, PW - 10, ry);
       ry += 20;
 
-      // Botão "Comprar Moedas" (Stripe)
+      // Botão "Comprar Moedas" (MercadoPago)
       {
         const btnX = 14;
         const btnY = ry;

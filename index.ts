@@ -1,11 +1,10 @@
 import { MongoClient, ObjectId } from "mongodb";
 import { checkServerIdentity as tlsCheckServerIdentity } from "tls";
-import Stripe from "stripe";
+import { MercadoPagoConfig, Preference, Payment } from "mercadopago";
 import index from "./index.html";
 
-const stripe = new Stripe(process.env.STRIPE_RESTRICTED_KEY!, { apiVersion: "2026-03-25.dahlia" });
-const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET!;
-const STRIPE_PREMIUM_PRICE_ID = process.env.STRIPE_PREMIUM_PRICE_ID!;
+const mp = new MercadoPagoConfig({ accessToken: process.env.MP_ACCESS_TOKEN! });
+const MP_WEBHOOK_SECRET = process.env.MP_WEBHOOK_SECRET ?? "";
 
 const MONGO_URI = process.env.MONGO_URI;
 if (!MONGO_URI) throw new Error("MONGO_URI environment variable is not set");
@@ -545,9 +544,9 @@ server = Bun.serve<WsData>({
       return new Response("OK");
     },
 
-    // ── Stripe ────────────────────────────────────────────────────────────────
+    // ── MercadoPago ───────────────────────────────────────────────────────────
 
-    "/stripe/checkout": async (req: Request) => {
+    "/mp/checkout": async (req: Request) => {
       if (req.method !== "POST")
         return new Response("Method Not Allowed", { status: 405 });
       const { token } = (await req.json()) as { token?: string };
@@ -556,52 +555,75 @@ server = Bun.serve<WsData>({
 
       const origin = req.headers.get("origin") ?? "http://localhost:9400";
       try {
-        const session = await stripe.checkout.sessions.create({
-          mode: "payment",
-          payment_method_types: ["card"],
-          line_items: [{ price: STRIPE_PREMIUM_PRICE_ID, quantity: 1 }],
-          metadata: { userId: sess.userId, username: sess.username },
-          success_url: `${origin}/?payment=success`,
-          cancel_url: `${origin}/?payment=cancelled`,
+        const preference = await new Preference(mp).create({
+          body: {
+            items: [
+              {
+                id: "coins_500",
+                title: "500 moedas — Cowboy Game",
+                quantity: 1,
+                unit_price: 10,
+                currency_id: "BRL",
+              },
+            ],
+            metadata: { userId: sess.userId, username: sess.username },
+            back_urls: {
+              success: `${origin}/?payment=success`,
+              failure: `${origin}/?payment=cancelled`,
+              pending: `${origin}/?payment=pending`,
+            },
+            ...(origin.startsWith("https://") ? { notification_url: `${origin}/mp/webhook` } : {}),
+          },
         });
-        return Response.json({ url: session.url });
+        return Response.json({ url: preference.init_point });
       } catch (err) {
-        const msg = err instanceof Error ? err.message : "Erro ao criar sessão de pagamento.";
-        console.error("[Stripe] checkout error:", msg);
+        console.error("[MP] checkout error:", err);
+        const msg = err instanceof Error ? err.message : "Erro ao criar preferência de pagamento.";
         return Response.json({ error: msg }, { status: 502 });
       }
     },
 
-    "/stripe/webhook": async (req: Request) => {
+    "/mp/webhook": async (req: Request) => {
       if (req.method !== "POST")
         return new Response("Method Not Allowed", { status: 405 });
 
-      const sig = req.headers.get("stripe-signature") ?? "";
-      const rawBody = await req.text();
+      const body = (await req.json()) as { type?: string; data?: { id?: string } };
 
-      let event: Stripe.Event;
-      try {
-        event = stripe.webhooks.constructEvent(rawBody, sig, STRIPE_WEBHOOK_SECRET);
-      } catch {
-        return new Response("Webhook signature invalid", { status: 400 });
+      // Valida assinatura HMAC se configurada
+      if (MP_WEBHOOK_SECRET) {
+        const xSig = req.headers.get("x-signature") ?? "";
+        const xReqId = req.headers.get("x-request-id") ?? "";
+        const dataId = body.data?.id ?? "";
+        const manifest = `id:${dataId};request-id:${xReqId};ts:${xSig.split(",").find(p => p.startsWith("ts="))?.slice(3) ?? ""}`;
+        const hmac = new Bun.CryptoHasher("sha256", MP_WEBHOOK_SECRET);
+        hmac.update(manifest);
+        const expected = hmac.digest("hex");
+        const received = xSig.split(",").find(p => p.startsWith("v1="))?.slice(3) ?? "";
+        if (expected !== received) {
+          return new Response("Signature invalid", { status: 400 });
+        }
       }
 
-      if (event.type === "checkout.session.completed") {
-        const checkoutSession = event.data.object as Stripe.Checkout.Session;
-        const userId = checkoutSession.metadata?.userId;
-        if (userId) {
-          // Crédita 500 moedas ao jogador
-          await users.updateOne(
-            { _id: new ObjectId(userId) },
-            { $inc: { coins: 500 } },
-          );
-          // Notifica o jogador online se estiver conectado
-          const ws = activeWsByUserId.get(userId);
-          if (ws) {
-            try {
-              ws.send(JSON.stringify({ type: "payment_success", coins: 500 }));
-            } catch { /**/ }
+      if (body.type === "payment" && body.data?.id) {
+        try {
+          const payment = await new Payment(mp).get({ id: body.data.id });
+          if (payment.status === "approved") {
+            const userId = (payment.metadata as Record<string, string> | undefined)?.userId;
+            if (userId) {
+              await users.updateOne(
+                { _id: new ObjectId(userId) },
+                { $inc: { coins: 500 } },
+              );
+              const ws = activeWsByUserId.get(userId);
+              if (ws) {
+                try {
+                  ws.send(JSON.stringify({ type: "payment_success", coins: 500 }));
+                } catch { /**/ }
+              }
+            }
           }
+        } catch (err) {
+          console.error("[MP] webhook payment fetch error:", err);
         }
       }
 

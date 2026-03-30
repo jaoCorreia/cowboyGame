@@ -11,7 +11,7 @@ const userData = await initAuth();
 preview.destroy();
 const game = new Game(canvas, userData);
 
-// Trata retorno do Stripe Checkout
+// Trata retorno do MercadoPago
 const paymentParam = new URLSearchParams(location.search).get("payment");
 if (paymentParam) {
   history.replaceState(null, "", location.pathname);
