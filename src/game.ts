@@ -435,6 +435,11 @@ export class Game {
   private eventPopupTimer = 10;
   private eventPopupCloseBtn = { x: 0, y: 0, w: 0, h: 0 };
 
+  // Starter pack one-time popup
+  private starterPackDismissed = !!localStorage.getItem("cowboy_starter_v1");
+  private starterPackBuyBtn = { x: 0, y: 0, w: 0, h: 0 };
+  private starterPackCloseBtn = { x: 0, y: 0, w: 0, h: 0 };
+
   // Admin
   private isAdmin = false;
   private adminCmdOpen = false;
@@ -1165,6 +1170,102 @@ export class Game {
     ctx.restore();
   }
 
+  private renderStarterPackPopup(W: number, H: number) {
+    if (this.isPreview || this.starterPackDismissed) return;
+    const { ctx } = this;
+    const PW = Math.min(340, W - 40);
+    const PH = 270;
+    const PX = (W - PW) / 2;
+    const PY = (H - PH) / 2;
+
+    ctx.save();
+
+    // Backdrop
+    ctx.fillStyle = "rgba(0,0,0,0.75)";
+    ctx.fillRect(0, 0, W, H);
+
+    // Panel glass
+    ctx.fillStyle = "rgba(12, 7, 2, 0.96)";
+    ctx.beginPath();
+    ctx.roundRect(PX, PY, PW, PH, 16);
+    ctx.fill();
+
+    // Gold border
+    ctx.strokeStyle = "rgba(210, 165, 45, 0.75)";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(PX + 0.75, PY + 0.75, PW - 1.5, PH - 1.5, 15.5);
+    ctx.stroke();
+
+    // Top glow
+    const topGrad = ctx.createLinearGradient(PX, PY, PX, PY + 70);
+    topGrad.addColorStop(0, "rgba(210,165,45,0.14)");
+    topGrad.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = topGrad;
+    ctx.beginPath();
+    ctx.roundRect(PX + 2, PY + 2, PW - 4, 70, [14, 14, 0, 0]);
+    ctx.fill();
+
+    // Coin icon
+    ctx.font = "38px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("🪙", W / 2, PY + 48);
+
+    // Title
+    ctx.fillStyle = "#FFD700";
+    ctx.font = "bold 17px sans-serif";
+    ctx.textBaseline = "alphabetic";
+    ctx.fillText("🎁 Starter Pack", W / 2, PY + 100);
+
+    // Description
+    ctx.fillStyle = "#D4B87A";
+    ctx.font = "13px sans-serif";
+    ctx.fillText("500 moedas para começar sua aventura!", W / 2, PY + 122);
+
+    // Price badge
+    const bw = 100, bh = 26, bx = W / 2 - 50, by = PY + 134;
+    ctx.fillStyle = "rgba(70, 38, 4, 0.9)";
+    ctx.beginPath();
+    ctx.roundRect(bx, by, bw, bh, 7);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(200, 155, 40, 0.7)";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.fillStyle = "#FFD700";
+    ctx.font = "bold 13px sans-serif";
+    ctx.textBaseline = "middle";
+    ctx.fillText("R$ 10,00", W / 2, by + bh / 2);
+
+    // Buy button
+    const buyW = PW - 52, buyH = 42, buyX = PX + 26, buyY = PY + 178;
+    this.starterPackBuyBtn = { x: buyX, y: buyY, w: buyW, h: buyH };
+    const buyGrad = ctx.createLinearGradient(buyX, buyY, buyX, buyY + buyH);
+    buyGrad.addColorStop(0, "#d4960e");
+    buyGrad.addColorStop(1, "#7a4e06");
+    ctx.fillStyle = buyGrad;
+    ctx.beginPath();
+    ctx.roundRect(buyX, buyY, buyW, buyH, 10);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(240, 190, 60, 0.6)";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.fillStyle = "#1a0a00";
+    ctx.font = "bold 14px sans-serif";
+    ctx.textBaseline = "middle";
+    ctx.fillText("💳  Comprar agora", W / 2, buyY + buyH / 2);
+
+    // Close link
+    const closeY = PY + PH - 16;
+    ctx.fillStyle = "rgba(140, 110, 65, 0.85)";
+    ctx.font = "12px sans-serif";
+    ctx.textBaseline = "middle";
+    ctx.fillText("Agora não", W / 2, closeY);
+    this.starterPackCloseBtn = { x: W / 2 - 44, y: closeY - 12, w: 88, h: 24 };
+
+    ctx.restore();
+  }
+
   private renderBirthdayDialog(W: number, H: number) {
     if (!this.birthdayDialogOpen) return;
     const { ctx } = this;
@@ -1429,6 +1530,24 @@ private preloadPlayerSprites() {
       return;
     }
 
+
+    // Starter pack popup
+    if (!this.starterPackDismissed) {
+      const bb = this.starterPackBuyBtn;
+      if (bb.w > 0 && x >= bb.x && x <= bb.x + bb.w && y >= bb.y && y <= bb.y + bb.h) {
+        this.starterPackDismissed = true;
+        localStorage.setItem("cowboy_starter_v1", "1");
+        void buyPremium(this.myToken);
+        return;
+      }
+      const scb = this.starterPackCloseBtn;
+      if (scb.w > 0 && x >= scb.x && x <= scb.x + scb.w && y >= scb.y && y <= scb.y + scb.h) {
+        this.starterPackDismissed = true;
+        localStorage.setItem("cowboy_starter_v1", "1");
+        return;
+      }
+      return; // swallow clicks while popup is open
+    }
 
     // Event popup: any click dismisses it
     if (!this.eventPopupDismissed && this.isBirthdayActive) {
@@ -4825,6 +4944,9 @@ private preloadPlayerSprites() {
     this.renderBirthdayParticles();
     if (this.birthdayDialogOpen) this.renderBirthdayDialog(W, H);
     if (!this.eventPopupDismissed) this.renderEventPopup(W, H);
+
+    // Starter pack popup (uma vez por usuário)
+    if (!this.starterPackDismissed) this.renderStarterPackPopup(W, H);
   }
 
   // ── Admin overlay ─────────────────────────────────────────────────────────
@@ -4929,59 +5051,95 @@ private preloadPlayerSprites() {
     const { ctx } = this;
 
     if (this.statsMinimized) {
-      // ── Versão compacta ──
-      this.drawPanel(6, 6, 136, 38, 0);
+      // ── Versão compacta (glass) ──
+      ctx.save();
+      ctx.fillStyle = "rgba(10, 6, 2, 0.84)";
+      ctx.beginPath();
+      ctx.roundRect(6, 6, 136, 38, 9);
+      ctx.fill();
+      ctx.strokeStyle = "rgba(180, 138, 45, 0.55)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(6.5, 6.5, 135, 37, 8.5);
+      ctx.stroke();
+      ctx.restore();
 
-      // Dot de cor do jogador local
       ctx.fillStyle = this.myColor;
       ctx.beginPath();
-      ctx.arc(20, 25, 5, 0, Math.PI * 2);
+      ctx.arc(20, 25, 4, 0, Math.PI * 2);
       ctx.fill();
 
       ctx.textAlign = "left";
       ctx.font = "bold 12px sans-serif";
       ctx.fillStyle = "#FFE0A0";
-      ctx.fillText(
-        `🐄 ${this.herdCows().length}  🏠 ${this.basedCount}`,
-        32,
-        29,
-      );
+      ctx.fillText(`🐄 ${this.herdCows().length}  🏠 ${this.basedCount}`, 30, 29);
 
       // Botão expandir
-      this.drawPixelBtn(110, 9, 22, 22, "normal");
+      ctx.save();
+      ctx.fillStyle = "rgba(180, 138, 45, 0.22)";
+      ctx.beginPath();
+      ctx.roundRect(111, 11, 22, 22, 5);
+      ctx.fill();
+      ctx.strokeStyle = "rgba(200,155,50,0.45)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.restore();
       ctx.fillStyle = "#FFD700";
       ctx.font = "bold 11px sans-serif";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.fillText("▶", 121, 20);
+      ctx.fillText("▶", 122, 22);
       ctx.textBaseline = "alphabetic";
     } else {
-      // ── Versão expandida ──
+      // ── Versão expandida (glass moderna) ──
       const ownedItems = SHOP_ITEMS.filter(
         (it) => (this.inventory.get(it.id) ?? 0) > 0,
       );
       const PW = 210;
-      // Base: cabeçalho(30) + 3 stats(60) + período(20) + moedas(20) + botãoPremium(28) + padding(16) = 174
       const PH =
         174 + (ownedItems.length > 0 ? 34 : 0) + (this.leiteTimer > 0 ? 20 : 0);
-      this.drawPanel(6, 6, PW, PH, 0);
 
-      // Cabeçalho: cor + nome do jogador
-      ctx.fillStyle = this.myColor;
+      // Painel glass
+      ctx.save();
+      ctx.fillStyle = "rgba(10, 6, 2, 0.88)";
       ctx.beginPath();
-      ctx.roundRect(12, 12, 12, 12, 2);
+      ctx.roundRect(6, 6, PW, PH, 11);
       ctx.fill();
-      ctx.textAlign = "left";
-      ctx.font = "16px Merriweather";
-      ctx.fillStyle = "#ffffff";
-      ctx.fillText(this.myName, 30, 23);
-
-      // Divisor
-      ctx.strokeStyle = "rgba(200,160,80,0.4)";
+      // Borda dourada fina
+      ctx.strokeStyle = "rgba(180, 138, 45, 0.52)";
       ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.moveTo(12, 30);
-      ctx.lineTo(PW - 6, 30);
+      ctx.roundRect(6.5, 6.5, PW - 1, PH - 1, 10.5);
+      ctx.stroke();
+      // Linha de brilho no topo
+      const topGrad = ctx.createLinearGradient(6, 6, 6 + PW, 6);
+      topGrad.addColorStop(0, "rgba(200,155,45,0)");
+      topGrad.addColorStop(0.5, "rgba(200,155,45,0.45)");
+      topGrad.addColorStop(1, "rgba(200,155,45,0)");
+      ctx.strokeStyle = topGrad;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(20, 7);
+      ctx.lineTo(PW - 8, 7);
+      ctx.stroke();
+      ctx.restore();
+
+      // Cabeçalho: dot cor + nome
+      ctx.fillStyle = this.myColor;
+      ctx.beginPath();
+      ctx.arc(20, 22, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.textAlign = "left";
+      ctx.font = "bold 13px sans-serif";
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(this.myName, 32, 26);
+
+      // Divisor
+      ctx.strokeStyle = "rgba(180,138,45,0.28)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(12, 33);
+      ctx.lineTo(PW - 6, 33);
       ctx.stroke();
 
       // Stats
@@ -4996,18 +5154,17 @@ private preloadPlayerSprites() {
 
       let ry = 48;
       for (const [label, value] of rows) {
-        ctx.font = "16px Merriweather";
-        ctx.fillStyle = "#C8A870";
+        ctx.font = "12px sans-serif";
+        ctx.fillStyle = "rgba(195,155,80,0.85)";
         ctx.textAlign = "left";
         ctx.fillText(label, 14, ry);
-        ctx.font = "16px Merriweather";
         ctx.fillStyle = "#FFE0A0";
         ctx.textAlign = "right";
         ctx.fillText(value, PW - 10, ry);
         ry += 20;
       }
 
-      // Indicador período do dia
+      // Período do dia
       {
         const period = this.timePeriod;
         const periodLabel =
@@ -5023,32 +5180,41 @@ private preloadPlayerSprites() {
             ? `rgba(160,190,255,${0.5 + this.nightFade * 0.5})`
             : period === "manha"
               ? "rgba(255,210,120,0.9)"
-              : "rgba(255,180,60,0.9)";
-        ctx.font = "bold 11px sans-serif";
+              : "rgba(255,175,55,0.9)";
+        ctx.font = "11px sans-serif";
         ctx.textAlign = "left";
         ctx.fillStyle = periodColor;
         ctx.fillText(periodLabel, 14, ry);
         ry += 20;
       }
 
-      // Moedas com ícone
+      // Moedas
       ctx.drawImage(this.icons.moneyIcon, 14, ry - 14, 16, 16);
-      ctx.font = "16px Merriweather";
-      ctx.fillStyle = "#FFD700";
+      ctx.font = "bold 12px sans-serif";
+      ctx.fillStyle = "rgba(195,155,80,0.85)";
       ctx.textAlign = "left";
       ctx.fillText("Moedas:", 34, ry);
+      ctx.fillStyle = "#FFD700";
       ctx.textAlign = "right";
       ctx.fillText(`${this.coins}`, PW - 10, ry);
       ry += 20;
 
-      // Botão "Comprar Moedas" (MercadoPago)
+      // Botão "Comprar Moedas" (MercadoPago) — gradiente moderno
       {
-        const btnX = 14;
-        const btnY = ry;
-        const btnW = PW - 20;
-        const btnH = 22;
-        this.drawPixelBtn(btnX, btnY, btnW, btnH, "normal");
-        ctx.fillStyle = "#FFD700";
+        const btnX = 14, btnY = ry, btnW = PW - 20, btnH = 22;
+        ctx.save();
+        const btnGrad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+        btnGrad.addColorStop(0, "rgba(190, 138, 18, 0.92)");
+        btnGrad.addColorStop(1, "rgba(100, 58, 6, 0.92)");
+        ctx.fillStyle = btnGrad;
+        ctx.beginPath();
+        ctx.roundRect(btnX, btnY, btnW, btnH, 5);
+        ctx.fill();
+        ctx.strokeStyle = "rgba(220, 170, 55, 0.6)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.restore();
+        ctx.fillStyle = "#FFE060";
         ctx.font = "bold 11px sans-serif";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
@@ -5073,22 +5239,38 @@ private preloadPlayerSprites() {
         );
       }
 
-      // Botão logout
-      this.drawPixelBtn(PW - 46, 9, 22, 22, "normal");
-      ctx.fillStyle = "#FF7777";
+      // Botão logout — minimalista
+      ctx.save();
+      ctx.fillStyle = "rgba(110, 30, 30, 0.72)";
+      ctx.beginPath();
+      ctx.roundRect(PW - 40, 10, 20, 20, 5);
+      ctx.fill();
+      ctx.strokeStyle = "rgba(200, 80, 80, 0.45)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.restore();
+      ctx.fillStyle = "#FF8080";
       ctx.font = "bold 11px sans-serif";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.fillText("⏻", PW - 35, 20);
+      ctx.fillText("⏻", PW - 30, 20);
       ctx.textBaseline = "alphabetic";
 
-      // Botão recolher
-      this.drawPixelBtn(PW - 20, 9, 22, 22, "normal");
+      // Botão recolher — minimalista
+      ctx.save();
+      ctx.fillStyle = "rgba(70, 52, 14, 0.72)";
+      ctx.beginPath();
+      ctx.roundRect(PW - 16, 10, 20, 20, 5);
+      ctx.fill();
+      ctx.strokeStyle = "rgba(180, 138, 45, 0.45)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.restore();
       ctx.fillStyle = "#FFD700";
       ctx.font = "11px sans-serif";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.fillText("◀", PW - 9, 20);
+      ctx.fillText("◀", PW - 6, 20);
       ctx.textBaseline = "alphabetic";
     }
   }
@@ -5126,10 +5308,21 @@ private preloadPlayerSprites() {
     const PX = 6;
     const PY = this.statsMinimized ? 60 : 160;
 
-    this.drawPanel(PX, PY, PW, PH, 1);
+    // Glass panel
+    ctx.save();
+    ctx.fillStyle = "rgba(10, 6, 2, 0.84)";
+    ctx.beginPath();
+    ctx.roundRect(PX, PY, PW, PH, 9);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(60, 190, 100, 0.35)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(PX + 0.5, PY + 0.5, PW - 1, PH - 1, 8.5);
+    ctx.stroke();
+    ctx.restore();
 
     // Cabeçalho
-    ctx.font = "11px sans-serif";
+    ctx.font = "bold 11px sans-serif";
     ctx.textAlign = "left";
     ctx.fillStyle = "#55FF99";
     ctx.fillText(
@@ -5139,7 +5332,7 @@ private preloadPlayerSprites() {
     );
 
     // Divisor
-    ctx.strokeStyle = "rgba(200,160,80,0.35)";
+    ctx.strokeStyle = "rgba(60,190,100,0.2)";
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(PX + 8, PY + 22);
