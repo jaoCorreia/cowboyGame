@@ -302,8 +302,6 @@ export class Game {
   private myLastMessage = "";
   private myLastMessageTime = 0;
   private bookOpen = false;
-  private bandits: Bandit[] = [];
-  private nextBanditId = 0;
   private banditSpawnTimer = 60;
   private banditAnimFrame = 0;
   private banditAnimTimer = 0;
@@ -2112,15 +2110,17 @@ private preloadPlayerSprites() {
     }
     if (this.lasso.active) return;
     // Scare bandit if close — drops cow and flees
-    const nearBandit = this.bandits.find(
-      (b) => b.state === "fleeing" && dist(this.player, b) <= 3.5,
+    const nearBanditEntry = this.world.query(EcsPosition, BanditAI).find(
+      ([, pos, ai]) => ai.state === "fleeing" && dist(this.player, pos) <= 3.5,
     );
-    if (nearBandit) {
-      if (nearBandit.targetCow) {
-        nearBandit.targetCow.state = "wandering";
-        nearBandit.targetCow = null;
+    if (nearBanditEntry) {
+      const [, , ai] = nearBanditEntry;
+      if (ai.targetCowEntity !== null) {
+        const cowAI = this.world.get(ai.targetCowEntity, CowAI);
+        if (cowAI) cowAI.state = "wandering";
+        ai.targetCowEntity = null;
       }
-      nearBandit.state = "scared";
+      ai.state = "scared";
       return;
     }
     const nearBench = this.nearestBench();
@@ -2877,6 +2877,35 @@ private preloadPlayerSprites() {
       .add(entity, new CowTypeComp(cowType))
       .add(entity, new BasedTag());
     return entity;
+  }
+
+  // Returns a Bandit-compatible object that reads/writes ECS components
+  private banditCompat(entity: Entity): Bandit & { _entity: Entity } {
+    const pos = this.world.must(entity, EcsPosition);
+    const ai = this.world.must(entity, BanditAI);
+    const world = this.world;
+    const cowCompatFn = this.cowCompat.bind(this);
+    return {
+      id: entity,
+      get col() { return pos.col; },
+      set col(v: number) { pos.col = v; },
+      get row() { return pos.row; },
+      set row(v: number) { pos.row = v; },
+      get fleeCol() { return ai.fleeCol; },
+      set fleeCol(v: number) { ai.fleeCol = v; },
+      get fleeRow() { return ai.fleeRow; },
+      set fleeRow(v: number) { ai.fleeRow = v; },
+      get state() { return ai.state as Bandit["state"]; },
+      set state(v: Bandit["state"]) { ai.state = v; },
+      get targetCow() {
+        if (ai.targetCowEntity === null || !world.isAlive(ai.targetCowEntity)) return null;
+        return cowCompatFn(ai.targetCowEntity);
+      },
+      set targetCow(v: Cow | null) {
+        ai.targetCowEntity = (v as (Cow & { _entity?: Entity }) | null)?._entity ?? null;
+      },
+      _entity: entity,
+    };
   }
 
   // Returns a Cow-compatible object that reads/writes ECS components
@@ -6153,15 +6182,13 @@ private preloadPlayerSprites() {
     const spawnRow = targetPos.row + 8;
     const fleeCol = MAP_COLS - 2;
     const fleeRow = MAP_ROWS - 2;
-    this.bandits.push({
-      id: this.nextBanditId++,
-      col: spawnCol,
-      row: spawnRow,
-      fleeCol,
-      fleeRow,
-      state: "approaching",
-      targetCow: this.cowCompat(entry[0]),
-    });
+    const banditEntity = this.world.create();
+    const banditAI = new BanditAI();
+    banditAI.state = "approaching";
+    banditAI.fleeCol = fleeCol;
+    banditAI.fleeRow = fleeRow;
+    banditAI.targetCowEntity = entry[0];
+    this.world.add(banditEntity, new EcsPosition(spawnCol, spawnRow)).add(banditEntity, banditAI);
   }
 
   private spawnBandit() {
@@ -6188,15 +6215,13 @@ private preloadPlayerSprites() {
     const fleeCol = spawn.col < MAP_COLS / 2 ? MAP_COLS - 2 : 1;
     const fleeRow = spawn.row < MAP_ROWS / 2 ? MAP_ROWS - 2 : 1;
 
-    this.bandits.push({
-      id: this.nextBanditId++,
-      col: spawn.col,
-      row: spawn.row,
-      fleeCol,
-      fleeRow,
-      state: "approaching",
-      targetCow: target,
-    });
+    const banditEntity = this.world.create();
+    const banditAI = new BanditAI();
+    banditAI.state = "approaching";
+    banditAI.fleeCol = fleeCol;
+    banditAI.fleeRow = fleeRow;
+    banditAI.targetCowEntity = targetEntry[0];
+    this.world.add(banditEntity, new EcsPosition(spawn.col, spawn.row)).add(banditEntity, banditAI);
   }
 
   private updateBandits(dt: number) {
@@ -6209,87 +6234,83 @@ private preloadPlayerSprites() {
       this.banditAnimFrame++;
     }
 
-    // If player is very close to a fleeing bandit, auto-scare (proximity mechanic)
-    for (const b of this.bandits) {
-      if (b.state === "fleeing" && dist(this.player, b) <= 2.5) {
-        if (b.targetCow) {
-          b.targetCow.state = "wandering";
-          b.targetCow = null;
+    const toDestroy: Entity[] = [];
+
+    // Auto-scare: player próximo de bandido em fuga
+    for (const [entity, pos, ai] of this.world.query(EcsPosition, BanditAI)) {
+      if (ai.state === "fleeing" && dist(this.player, pos) <= 2.5) {
+        if (ai.targetCowEntity !== null) {
+          const cowAI = this.world.get(ai.targetCowEntity, CowAI);
+          if (cowAI) cowAI.state = "wandering";
+          ai.targetCowEntity = null;
         }
-        b.state = "scared";
+        ai.state = "scared";
+        ai.fleeCol = pos.col < MAP_COLS / 2 ? MAP_COLS - 2 : 1;
+        ai.fleeRow = pos.row < MAP_ROWS / 2 ? MAP_ROWS - 2 : 1;
       }
     }
 
-    // Update each bandit
-    for (let i = this.bandits.length - 1; i >= 0; i--) {
-      const b = this.bandits[i]!;
+    // Atualiza cada bandido
+    for (const [entity, pos, ai] of this.world.query(EcsPosition, BanditAI)) {
+      if (ai.state === "approaching") {
+        const cowEntity = ai.targetCowEntity;
+        const cowAI = cowEntity !== null ? this.world.get(cowEntity, CowAI) : null;
+        const cowPos = cowEntity !== null ? this.world.get(cowEntity, EcsPosition) : null;
 
-      if (b.state === "approaching") {
-        const target = b.targetCow;
-        // If target became invalid, flee empty
-        if (
-          !target ||
-          (target.state !== "wandering" &&
-            target.state !== "fleeing" &&
-            target.state !== "based")
-        ) {
-          b.state = "scared";
-          b.targetCow = null;
+        if (!cowAI || !cowPos ||
+          (cowAI.state !== "wandering" && cowAI.state !== "fleeing" && cowAI.state !== "based")) {
+          ai.state = "scared";
+          ai.targetCowEntity = null;
+          ai.fleeCol = pos.col < MAP_COLS / 2 ? MAP_COLS - 2 : 1;
+          ai.fleeRow = pos.row < MAP_ROWS / 2 ? MAP_ROWS - 2 : 1;
         } else {
-          const dx = target.col - b.col;
-          const dy = target.row - b.row;
+          const dx = cowPos.col - pos.col;
+          const dy = cowPos.row - pos.row;
           const d = Math.sqrt(dx * dx + dy * dy);
           if (d < 1.2) {
-            // Steal cow — update flee destination to edge opposite from current pos
-            target.state = "stolen";
-            b.state = "fleeing";
-            b.fleeCol = b.col < MAP_COLS / 2 ? MAP_COLS - 2 : 1;
-            b.fleeRow = b.row < MAP_ROWS / 2 ? MAP_ROWS - 2 : 1;
+            cowAI.state = "fleeing"; // marcada como "roubada" — sai do rebanho
+            ai.state = "fleeing";
+            ai.fleeCol = pos.col < MAP_COLS / 2 ? MAP_COLS - 2 : 1;
+            ai.fleeRow = pos.row < MAP_ROWS / 2 ? MAP_ROWS - 2 : 1;
             this.discoveredNPCs.add("ladrao_culto");
           } else {
-            b.col += (dx / d) * BANDIT_APPROACH_SPEED * dt;
-            b.row += (dy / d) * BANDIT_APPROACH_SPEED * dt;
+            pos.col += (dx / d) * BANDIT_APPROACH_SPEED * dt;
+            pos.row += (dy / d) * BANDIT_APPROACH_SPEED * dt;
           }
         }
-      } else if (b.state === "fleeing") {
-        const dx = b.fleeCol - b.col;
-        const dy = b.fleeRow - b.row;
+      } else if (ai.state === "fleeing") {
+        const dx = ai.fleeCol - pos.col;
+        const dy = ai.fleeRow - pos.row;
         const d = Math.sqrt(dx * dx + dy * dy);
         if (d < 2) {
-          // Escaped — remove bandit and stolen cow
-          if (b.targetCow) {
-            const tc = b.targetCow as Cow & { _entity?: Entity };
-            if (tc._entity !== undefined) this.world.destroy(tc._entity);
-          }
-          this.bandits.splice(i, 1);
+          // Escapou — destrói o bandido e a vaca roubada
+          if (ai.targetCowEntity !== null) this.world.destroy(ai.targetCowEntity);
+          toDestroy.push(entity);
           continue;
         }
         const spd = BANDIT_FLEE_SPEED * dt;
-        b.col += (dx / d) * spd;
-        b.row += (dy / d) * spd;
-        if (b.targetCow) {
-          b.targetCow.col = b.col;
-          b.targetCow.row = b.row;
+        pos.col += (dx / d) * spd;
+        pos.row += (dy / d) * spd;
+        // Arrasta a vaca junto
+        if (ai.targetCowEntity !== null) {
+          const cowPos = this.world.get(ai.targetCowEntity, EcsPosition);
+          if (cowPos) { cowPos.col = pos.col; cowPos.row = pos.row; }
         }
-      } else if (b.state === "scared") {
-        const dx = b.fleeCol - b.col;
-        const dy = b.fleeRow - b.row;
+      } else if (ai.state === "scared") {
+        const dx = ai.fleeCol - pos.col;
+        const dy = ai.fleeRow - pos.row;
         const d = Math.sqrt(dx * dx + dy * dy);
-        if (d < 2) {
-          this.bandits.splice(i, 1);
-          continue;
-        }
-        const spd = BANDIT_SCARED_SPEED * dt;
-        b.col += (dx / d) * spd;
-        b.row += (dy / d) * spd;
+        if (d < 2) { toDestroy.push(entity); continue; }
+        pos.col += (dx / d) * BANDIT_SCARED_SPEED * dt;
+        pos.row += (dy / d) * BANDIT_SCARED_SPEED * dt;
       }
     }
 
-    // Spawn timer — only in active periods and when below max bandits
-    if (
-      this.BANDIT_ACTIVE_PERIODS.includes(period) &&
-      this.bandits.length < 3
-    ) {
+    for (const e of toDestroy) this.world.destroy(e);
+
+    // Spawn timer
+    if (this.BANDIT_ACTIVE_PERIODS.includes(period) &&
+      this.world.query(BanditAI).length < 3) {
       this.banditSpawnTimer -= dt;
       if (this.banditSpawnTimer <= 0) {
         this.spawnBandit();
@@ -6299,17 +6320,17 @@ private preloadPlayerSprites() {
   }
 
   private renderBandits() {
-    for (const b of this.bandits) {
-      this.drawBandit(b);
+    for (const [entity] of this.world.query(EcsPosition, BanditAI)) {
+      this.drawBandit(this.banditCompat(entity));
     }
 
     // Hint when close
-    const near = this.bandits.find(
-      (b) => b.state === "fleeing" && dist(this.player, b) <= 4.5,
+    const nearEntry = this.world.query(EcsPosition, BanditAI).find(([, pos, ai]) =>
+      ai.state === "fleeing" && dist(this.player, pos) <= 4.5,
     );
-    if (near) {
+    if (nearEntry) {
       const { ctx } = this;
-      const { x, y } = this.isoToScreen(near.col, near.row);
+      const { x, y } = this.isoToScreen(nearEntry[1].col, nearEntry[1].row);
       ctx.fillStyle = "#FFD700";
       ctx.font = "bold 11px sans-serif";
       ctx.textAlign = "center";
