@@ -59,6 +59,10 @@ import {
 } from "./network";
 import { type UserData, saveGameState, logout, buyPremium } from "./auth";
 import { type GameItem, SHOP_ITEMS, itemNextPrice } from "./items";
+import { World, type Entity } from "./ecs/World";
+import { Position as EcsPosition, CowAI, CowTypeComp, BanditAI, BasedTag, LegacyId } from "./components";
+import { CowAISystem } from "./systems/CowAISystem";
+import { BanditAISystem } from "./systems/BanditAISystem";
 
 interface NPCEntry {
   id: string;
@@ -118,7 +122,7 @@ interface Cow {
 
 interface Lasso {
   active: boolean;
-  cow: Cow | null;
+  cowEntity: Entity | null;
   phase: "throwing" | "pulling" | "fail";
   throwT: number;
   clickCount: number;
@@ -222,9 +226,11 @@ export class Game {
   private ctx: CanvasRenderingContext2D;
   private map: Tile[][];
   private player: Player;
-  private cows: Cow[];
   private basedCount = 0;
   private lasso: Lasso;
+  private world = new World();
+  private cowAISystem = new CowAISystem();
+  private banditAISystem = new BanditAISystem();
   private camX = 0;
   private camY = 0;
   private icons;
@@ -493,32 +499,20 @@ export class Game {
       this.coins = serverCoins > 0 ? serverCoins : localCoins;
       this.inventory = new Map(Object.entries(userData.inventory ?? {}));
     }
-    this.cows = Array.from({ length: COW_COUNT }, (_, i) =>
-      spawnCow(i, this.map),
-    );
+    for (let i = 0; i < COW_COUNT; i++) {
+      this.spawnCowEntity(i);
+    }
     // Restaura vacas que estavam na base ao deslogar
     if (userData?.basedCows && userData.basedCows.length > 0) {
       userData.basedCows.forEach((typeId, i) => {
-        const cowType = COW_TYPES.find((t) => t.id === typeId) ?? COW_TYPES[0]!;
         const pos = basedSlotPos(i);
-        this.cows.push({
-          id: COW_COUNT + i,
-          col: pos.col,
-          row: pos.row,
-          state: "based",
-          type: cowType,
-          wanderTimer: 0,
-          wanderDirCol: 0,
-          wanderDirRow: 0,
-          herdIndex: i,
-          sparkTimer: 0,
-        });
+        this.addBasedCowEntity(COW_COUNT + i, pos.col, pos.row, typeId);
       });
       this.nextCowId = COW_COUNT + userData.basedCows.length;
     }
     this.lasso = {
       active: false,
-      cow: null,
+      cowEntity: null,
       phase: "throwing",
       throwT: 0,
       clickCount: 0,
@@ -596,8 +590,7 @@ export class Game {
         onCowBased: (batch) => {
           if (batch.id === this.myId) {
             // Aplica posições canônicas do servidor nas vacas locais no curral
-            const localBased = this.cows
-              .filter((c) => c.state === "based")
+            const localBased = this.basedCows()
               .sort((a, b) => a.herdIndex - b.herdIndex);
             batch.cows.forEach((pos, i) => {
               if (localBased[i]) {
@@ -707,8 +700,7 @@ export class Game {
           discovered: [...this.discovered],
           discoveredNPCs: [...this.discoveredNPCs],
           capturedByType: Object.fromEntries(this.capturedByType),
-          basedCowTypes: this.cows
-            .filter((c) => c.state === "based")
+          basedCowTypes: this.basedCows()
             .sort((a, b) => a.herdIndex - b.herdIndex)
             .map((c) => c.type.id),
           coins: this.coins,
@@ -878,11 +870,12 @@ export class Game {
       ok(`Teletransportado para (${col}, ${row})`);
 
     } else if (cmd === "spawn") {
-      const cow = spawnCow(this.nextCowId++, this.map, this.isNight);
-      cow.col = this.player.col + 2;
-      cow.row = this.player.row + 2;
-      this.cows.push(cow);
-      ok(`Vaca spawned: ${cow.type.id} em (${cow.col.toFixed(1)}, ${cow.row.toFixed(1)})`);
+      const entity = this.spawnCowEntity(this.nextCowId++);
+      const pos = this.world.must(entity, EcsPosition);
+      pos.col = this.player.col + 2;
+      pos.row = this.player.row + 2;
+      const tc = this.world.must(entity, CowTypeComp);
+      ok(`Vaca spawned: ${tc.cowType.id} em (${pos.col.toFixed(1)}, ${pos.row.toFixed(1)})`);
 
     } else if (cmd === "godmode" || cmd === "god") {
       this.adminGodMode = !this.adminGodMode;
@@ -963,8 +956,9 @@ export class Game {
       ok(`Online: ${names || "nenhum outro jogador"}`);
 
     } else if (cmd === "clearbase") {
-      const based = this.cows.filter((c) => c.state === "based");
-      for (const c of based) this.cows.splice(this.cows.indexOf(c), 1);
+      const based = this.world.query(EcsPosition, CowAI)
+        .filter(([,, ai]) => ai.state === "based");
+      for (const [e] of based) this.world.destroy(e);
       this.basedCount = 0;
       ok(`Base limpa: ${based.length} vacas removidas`);
 
@@ -2014,15 +2008,15 @@ private preloadPlayerSprites() {
     }
 
     // Click on a cow
-    for (const cow of this.cows) {
-      if (cow.state !== "wandering") continue;
-      const s = this.isoToScreen(cow.col, cow.row);
+    for (const [entity, pos, ai] of this.world.query(EcsPosition, CowAI)) {
+      if (ai.state !== "wandering") continue;
+      const s = this.isoToScreen(pos.col, pos.row);
       if (
         Math.hypot(x - s.x, y - (s.y - 12)) < 34 &&
-        dist(this.player, cow) <= this.effectiveCaptureRange
+        Math.hypot(pos.col - this.player.col, pos.row - this.player.row) <= this.effectiveCaptureRange
       ) {
         if (this.herdCows().length >= this.effectiveHerdCapacity) return;
-        this.startLasso(cow);
+        this.startLasso(entity);
         return;
       }
     }
@@ -2175,13 +2169,12 @@ private preloadPlayerSprites() {
       this.startChop(nearTree.col, nearTree.row);
       return;
     }
-    const cow = this.nearestWanderingCow();
+    const cowEntity = this.nearestWanderingCow();
     if (
-      cow &&
-      dist(this.player, cow) <= this.effectiveCaptureRange &&
+      cowEntity !== null &&
       this.herdCows().length < this.effectiveHerdCapacity
     )
-      this.startLasso(cow);
+      this.startLasso(cowEntity);
   }
 
   private toggleBook() {
@@ -2347,16 +2340,16 @@ private preloadPlayerSprites() {
     const nowNight = this.isNight;
     if (this.prevIsNight && !nowNight) {
       // Dawn: despawn wandering/fleeing nightOnly cows
-      this.cows = this.cows.filter(
-        (cow) =>
-          !cow.type.nightOnly ||
-          (cow.state !== "wandering" && cow.state !== "fleeing"),
-      );
+      for (const [entity, , ai, tc] of this.world.query(EcsPosition, CowAI, CowTypeComp)) {
+        if (tc.cowType.nightOnly && (ai.state === "wandering" || ai.state === "fleeing")) {
+          this.world.destroy(entity);
+        }
+      }
     }
     if (!this.prevIsNight && nowNight) {
       // Dusk: spawn a burst of 3 night cows immediately
       for (let i = 0; i < 3; i++) {
-        this.cows.push(spawnCow(this.nextCowId++, this.map, true));
+        this.spawnCowEntity(this.nextCowId++, true);
       }
     }
     if (nowNight !== this.prevIsNight) this.onPeriodChange();
@@ -2365,15 +2358,15 @@ private preloadPlayerSprites() {
     // Respawn de vacas a cada 45-75s, sem ultrapassar COW_COUNT ativas
     this.cowSpawnTimer -= dt;
     if (this.cowSpawnTimer <= 0) {
-      const active = this.cows.filter(
-        (c) =>
-          c.state === "wandering" ||
-          c.state === "fleeing" ||
-          c.state === "lassoed" ||
-          c.state === "captured",
-      ).length;
+      const active = this.world.query(CowAI)
+        .filter(([, ai]) =>
+          ai.state === "wandering" ||
+          ai.state === "fleeing" ||
+          ai.state === "lassoed" ||
+          ai.state === "herd",
+        ).length;
       if (active < COW_COUNT) {
-        this.cows.push(spawnCow(this.nextCowId++, this.map, this.isNight));
+        this.spawnCowEntity(this.nextCowId++);
       }
       this.cowSpawnTimer = 45 + Math.random() * 30;
     }
@@ -2398,8 +2391,7 @@ private preloadPlayerSprites() {
     const discovered = [...this.discovered];
     const discoveredNPCs = [...this.discoveredNPCs];
     const capturedByType = Object.fromEntries(this.capturedByType);
-    const basedCowTypes = this.cows
-      .filter((c) => c.state === "based")
+    const basedCowTypes = this.basedCows()
       .sort((a, b) => a.herdIndex - b.herdIndex)
       .map((c) => c.type.id);
     const inventory = Object.fromEntries(this.inventory);
@@ -2430,8 +2422,7 @@ private preloadPlayerSprites() {
     const discovered = [...this.discovered];
     const discoveredNPCs = [...this.discoveredNPCs];
     const capturedByType = Object.fromEntries(this.capturedByType);
-    const basedCowTypes = this.cows
-      .filter((c) => c.state === "based")
+    const basedCowTypes = this.basedCows()
       .map((c) => c.type.id);
     const inventory = Object.fromEntries(this.inventory);
     await saveGameState(
@@ -2561,102 +2552,23 @@ private preloadPlayerSprites() {
     this.updateHerd(dt);
   }
 
-  private updateHerd(dt: number) {
-    const herd = this.herdCows();
-    let prevCol = this.player.col,
-      prevRow = this.player.row;
-    for (const cow of herd) {
-      const dc = prevCol - cow.col,
-        dr = prevRow - cow.row;
-      const d = Math.hypot(dc, dr);
-      if (d > HERD_SPACING) {
-        const spd = Math.min(HERD_FOLLOW_SPEED, d * 6) * dt;
-        cow.col += (dc / d) * spd;
-        cow.row += (dr / d) * spd;
-      }
-      prevCol = cow.col;
-      prevRow = cow.row;
-    }
-  }
+  private updateHerd(_dt: number) { /* now handled by CowAISystem */ }
 
   private updateCows(dt: number) {
-    for (const cow of this.cows) {
-      if (cow.sparkTimer > 0) cow.sparkTimer -= dt;
-      if (cow.state !== "wandering" && cow.state !== "fleeing") continue;
-
-      // ── Full flee (after failed lasso) ───────────────────────────────────
-      if (cow.state === "fleeing") {
-        const dc = cow.col - this.player.col,
-          dr = cow.row - this.player.row;
-        const d = Math.hypot(dc, dr);
-        if (d < 10 && d > 0) {
-          const nc = cow.col + (dc / d) * COW_FLEE_SPEED * dt;
-          const nr = cow.row + (dr / d) * COW_FLEE_SPEED * dt;
-          if (!isObstacle(this.map[Math.floor(nr)]![Math.floor(nc)]!)) {
-            cow.col = Math.max(1, Math.min(MAP_COLS - 2, nc));
-            cow.row = Math.max(1, Math.min(MAP_ROWS - 2, nr));
-          }
-        } else {
-          cow.state = "wandering";
-          cow.wanderTimer = 1;
-        }
-        continue;
-      }
-
-      // ── Wary: slowly back away when player is too close ──────────────────
-      if (cow.type.fearDistance > 0) {
-        const pd = dist(this.player, cow);
-        if (pd < cow.type.fearDistance && pd > 0.5) {
-          const dc = cow.col - this.player.col,
-            dr = cow.row - this.player.row;
-          const len = Math.hypot(dc, dr);
-          // Speed scales with proximity: faster the closer the player
-          const intensity = 1 - pd / cow.type.fearDistance;
-          const speed = cow.type.fearSpeed * intensity;
-          const nc = cow.col + (dc / len) * speed * dt;
-          const nr = cow.row + (dr / len) * speed * dt;
-          const tc = this.map[Math.floor(nr)]?.[Math.floor(nc)];
-          if (tc && !isObstacle(tc)) {
-            cow.col = Math.max(1, Math.min(MAP_COLS - 2, nc));
-            cow.row = Math.max(1, Math.min(MAP_ROWS - 2, nr));
-          } else {
-            // Blocked by obstacle — try sliding along it
-            const ncX = cow.col + (dc / len) * speed * dt;
-            const tcX = this.map[Math.floor(cow.row)]?.[Math.floor(ncX)];
-            if (tcX && !isObstacle(tcX))
-              cow.col = Math.max(1, Math.min(MAP_COLS - 2, ncX));
-            const nrY = cow.row + (dr / len) * speed * dt;
-            const tcY = this.map[Math.floor(nrY)]?.[Math.floor(cow.col)];
-            if (tcY && !isObstacle(tcY))
-              cow.row = Math.max(1, Math.min(MAP_ROWS - 2, nrY));
-          }
-          continue;
-        }
-      }
-
-      // ── Normal wander ────────────────────────────────────────────────────
-      cow.wanderTimer -= dt;
-      if (cow.wanderTimer <= 0) {
-        const a = Math.random() * Math.PI * 2;
-        cow.wanderDirCol = Math.cos(a);
-        cow.wanderDirRow = Math.sin(a);
-        cow.wanderTimer = 2 + Math.random() * 3;
-      }
-      const nc = cow.col + cow.wanderDirCol * COW_WANDER_SPEED * dt;
-      const nr = cow.row + cow.wanderDirRow * COW_WANDER_SPEED * dt;
-      const tc = this.map[Math.floor(nr)]?.[Math.floor(nc)];
-      if (tc && !isObstacle(tc)) {
-        cow.col = Math.max(1, Math.min(MAP_COLS - 2, nc));
-        cow.row = Math.max(1, Math.min(MAP_ROWS - 2, nr));
-      } else {
-        cow.wanderTimer = 0;
-      }
-    }
+    this.cowAISystem.update(this.world, dt, {
+      map: this.map,
+      playerCol: this.player.col,
+      playerRow: this.player.row,
+      lassoActive: this.lasso.active,
+      lassoTargetEntity: this.lasso.cowEntity ?? null,
+      herdCapacity: this.effectiveHerdCapacity,
+      isNight: this.isNight,
+    });
   }
 
   private updateLasso(dt: number) {
     const l = this.lasso;
-    if (!l.cow) {
+    if (l.cowEntity === null || !this.world.isAlive(l.cowEntity)) {
       l.active = false;
       return;
     }
@@ -2674,18 +2586,19 @@ private preloadPlayerSprites() {
     }
     if (l.phase === "pulling") {
       l.timeLeft -= dt;
-      if (l.clickCount >= this.effectiveLassoClicks(l.cow.type.clicksNeeded)) {
-        this.captureCow(l.cow);
+      const clicksNeeded = this.world.must(l.cowEntity, CowTypeComp).cowType.clicksNeeded;
+      if (l.clickCount >= this.effectiveLassoClicks(clicksNeeded)) {
+        this.captureCow(l.cowEntity);
         l.active = false;
         return;
       }
       if (l.timeLeft <= 0) {
         if (this.adminGodMode) {
-          this.captureCow(l.cow);
+          this.captureCow(l.cowEntity);
           l.active = false;
         } else {
           l.phase = "fail";
-          l.cow.state = "fleeing";
+          this.world.must(l.cowEntity, CowAI).state = "fleeing";
           setTimeout(() => {
             this.lasso.active = false;
           }, 700);
@@ -2694,17 +2607,20 @@ private preloadPlayerSprites() {
     }
   }
 
-  private captureCow(cow: Cow) {
+  private captureCow(entity: Entity) {
     const herdLen = this.herdCows().length;
-    cow.state = "captured";
-    cow.herdIndex = herdLen;
-    cow.col = this.player.col;
-    cow.row = this.player.row;
-    cow.sparkTimer = 1.5;
-    this.discovered.add(cow.type.id);
+    const pos = this.world.must(entity, EcsPosition);
+    const ai = this.world.must(entity, CowAI);
+    const tc = this.world.must(entity, CowTypeComp);
+    ai.state = "herd";
+    ai.herdIndex = herdLen;
+    pos.col = this.player.col;
+    pos.row = this.player.row;
+    ai.sparkTimer = 1.5;
+    this.discovered.add(tc.cowType.id);
     this.capturedByType.set(
-      cow.type.id,
-      (this.capturedByType.get(cow.type.id) ?? 0) + 1,
+      tc.cowType.id,
+      (this.capturedByType.get(tc.cowType.id) ?? 0) + 1,
     );
   }
 
@@ -2717,9 +2633,9 @@ private preloadPlayerSprites() {
       cow.state = "based";
       cow.herdIndex = startIdx + i;
       // Posição determinística pelo índice — não precisa esperar o servidor
-      const pos = basedSlotPos(startIdx + i);
-      cow.col = pos.col;
-      cow.row = pos.row;
+      const slotPos = basedSlotPos(startIdx + i);
+      cow.col = slotPos.col;
+      cow.row = slotPos.row;
       // Respawn gerenciado pelo cowSpawnTimer no update loop
     }
     // Notifica outros jogadores (multiplayer visual)
@@ -2728,12 +2644,14 @@ private preloadPlayerSprites() {
     this.triggerSave();
   }
 
-  private startLasso(cow: Cow) {
-    cow.state = "lassoed";
-    this.discovered.add(cow.type.id);
+  private startLasso(entity: Entity) {
+    const ai = this.world.must(entity, CowAI);
+    const tc = this.world.must(entity, CowTypeComp);
+    ai.state = "lassoed" as never;
+    this.discovered.add(tc.cowType.id);
     this.lasso = {
       active: true,
-      cow,
+      cowEntity: entity,
       phase: "throwing",
       throwT: 0,
       clickCount: 0,
@@ -2848,12 +2766,13 @@ private preloadPlayerSprites() {
     localStorage.setItem(`cowboy_coins_${this.myName}`, String(this.coins));
   }
 
-  private sellCow(cow: Cow) {
+  private sellCow(cow: Cow & { _entity?: Entity }) {
     const price = COW_SELL_PRICES[cow.type.rarity] ?? 10;
     this.coins += price;
     this.saveCoinsLocally();
-    const idx = this.cows.indexOf(cow);
-    if (idx !== -1) this.cows.splice(idx, 1);
+    if (cow._entity !== undefined) {
+      this.world.destroy(cow._entity);
+    }
     // Reindexar o rebanho restante
     this.herdCows().forEach((c, i) => {
       c.herdIndex = i;
@@ -2866,27 +2785,25 @@ private preloadPlayerSprites() {
     if (herd.length === 0) return;
     for (const cow of herd) {
       this.coins += COW_SELL_PRICES[cow.type.rarity] ?? 10;
-      const idx = this.cows.indexOf(cow);
-      if (idx !== -1) this.cows.splice(idx, 1);
+      if (cow._entity !== undefined) this.world.destroy(cow._entity);
     }
     this.saveCoinsLocally();
     this.triggerSave();
   }
 
-  private sellBasedCow(cow: Cow) {
+  private sellBasedCow(cow: Cow & { _entity?: Entity }) {
     this.coins += COW_SELL_PRICES[cow.type.rarity] ?? 10;
     this.saveCoinsLocally();
-    const idx = this.cows.indexOf(cow);
-    if (idx !== -1) this.cows.splice(idx, 1);
+    if (cow._entity !== undefined) this.world.destroy(cow._entity);
     this.basedCount = Math.max(0, this.basedCount - 1);
     // Reindexar e reposicionar vacas restantes no curral
     this.basedCows()
       .sort((a, b) => a.herdIndex - b.herdIndex)
       .forEach((c, i) => {
         c.herdIndex = i;
-        const pos = basedSlotPos(i);
-        c.col = pos.col;
-        c.row = pos.row;
+        const slotPos = basedSlotPos(i);
+        c.col = slotPos.col;
+        c.row = slotPos.row;
       });
     this.triggerSave();
   }
@@ -2896,8 +2813,7 @@ private preloadPlayerSprites() {
     if (based.length === 0) return;
     for (const cow of based) {
       this.coins += COW_SELL_PRICES[cow.type.rarity] ?? 10;
-      const idx = this.cows.indexOf(cow);
-      if (idx !== -1) this.cows.splice(idx, 1);
+      if (cow._entity !== undefined) this.world.destroy(cow._entity);
     }
     this.basedCount = 0;
     this.saveCoinsLocally();
@@ -2915,14 +2831,81 @@ private preloadPlayerSprites() {
     this.triggerSave();
   }
 
-  private herdCows() {
-    return this.cows
-      .filter((c) => c.state === "captured")
-      .sort((a, b) => a.herdIndex - b.herdIndex);
+  private herdCows(): (Cow & { _entity: Entity })[] {
+    return this.world.query(EcsPosition, CowAI)
+      .filter(([,, ai]) => ai.state === "herd")
+      .sort((a, b) => a[2].herdIndex - b[2].herdIndex)
+      .map(([e]) => this.cowCompat(e));
   }
 
-  private basedCows() {
-    return this.cows.filter((c) => c.state === "based");
+  private basedCows(): (Cow & { _entity: Entity })[] {
+    return this.world.query(EcsPosition, CowAI)
+      .filter(([,, ai]) => ai.state === "based")
+      .map(([e]) => this.cowCompat(e));
+  }
+
+  // Creates a cow entity in the ECS world
+  private spawnCowEntity(id: number, nightMode = false): Entity {
+    const rawCow = spawnCow(id, this.map, nightMode);
+    const entity = this.world.create();
+    const ai = new CowAI();
+    ai.state = rawCow.state as CowAI["state"];
+    ai.wanderTimer = rawCow.wanderTimer;
+    ai.wanderDirCol = rawCow.wanderDirCol;
+    ai.wanderDirRow = rawCow.wanderDirRow;
+    ai.herdIndex = rawCow.herdIndex;
+    ai.sparkTimer = rawCow.sparkTimer;
+    this.world
+      .add(entity, new EcsPosition(rawCow.col, rawCow.row))
+      .add(entity, new LegacyId(id))
+      .add(entity, ai)
+      .add(entity, new CowTypeComp(rawCow.type));
+    return entity;
+  }
+
+  // Creates a based cow entity from direct position (for restoring saved cows)
+  private addBasedCowEntity(id: number, col: number, row: number, typeId: string): Entity {
+    const cowType = COW_TYPES.find((t) => t.id === typeId) ?? COW_TYPES[0]!;
+    const entity = this.world.create();
+    const ai = new CowAI();
+    ai.state = "based";
+    ai.herdIndex = id - COW_COUNT; // slot index
+    this.world
+      .add(entity, new EcsPosition(col, row))
+      .add(entity, new LegacyId(id))
+      .add(entity, ai)
+      .add(entity, new CowTypeComp(cowType))
+      .add(entity, new BasedTag());
+    return entity;
+  }
+
+  // Returns a Cow-compatible object that reads/writes ECS components
+  private cowCompat(entity: Entity): Cow & { _entity: Entity } {
+    const pos = this.world.must(entity, EcsPosition);
+    const ai = this.world.must(entity, CowAI);
+    const tc = this.world.must(entity, CowTypeComp);
+    const lid = this.world.must(entity, LegacyId);
+    return {
+      id: lid.id,
+      get col() { return pos.col; },
+      set col(v: number) { pos.col = v; },
+      get row() { return pos.row; },
+      set row(v: number) { pos.row = v; },
+      get state() { return ai.state as CowState; },
+      set state(v: CowState) { ai.state = v as never; },
+      get type() { return tc.cowType; },
+      get wanderTimer() { return ai.wanderTimer; },
+      set wanderTimer(v: number) { ai.wanderTimer = v; },
+      get wanderDirCol() { return ai.wanderDirCol; },
+      set wanderDirCol(v: number) { ai.wanderDirCol = v; },
+      get wanderDirRow() { return ai.wanderDirRow; },
+      set wanderDirRow(v: number) { ai.wanderDirRow = v; },
+      get herdIndex() { return ai.herdIndex; },
+      set herdIndex(v: number) { ai.herdIndex = v; },
+      get sparkTimer() { return ai.sparkTimer; },
+      set sparkTimer(v: number) { ai.sparkTimer = v; },
+      _entity: entity,
+    };
   }
 
   private dropItem(item: GameItem) {
@@ -3082,18 +3065,13 @@ private preloadPlayerSprites() {
     this.tradeState = "idle";
   }
 
-  private nearestWanderingCow(): Cow | null {
-    let best: Cow | null = null,
-      bd = Infinity;
-    for (const c of this.cows) {
-      if (c.state !== "wandering") continue;
-      const d = dist(this.player, c);
-      if (d < bd) {
-        bd = d;
-        best = c;
-      }
-    }
-    return best;
+  private nearestWanderingCow(): Entity | null {
+    return CowAISystem.nearestWandering(
+      this.world,
+      this.player.col,
+      this.player.row,
+      this.effectiveCaptureRange,
+    );
   }
 
   private nearestChoppableTree(): { col: number; row: number } | null {
@@ -3913,8 +3891,8 @@ private preloadPlayerSprites() {
       });
     }
 
-    for (const cow of this.cows) {
-      const c = cow;
+    for (const [entity] of this.world.query(EcsPosition, CowAI, CowTypeComp)) {
+      const c = this.cowCompat(entity);
       items.push({
         depth: c.col + c.row + (c.state === "based" ? -100 : 0),
         draw: () => this.drawCow(c),
@@ -4370,9 +4348,10 @@ private preloadPlayerSprites() {
 
     // Capture range ring
     if (!this.lasso.active) {
-      const nearest = this.nearestWanderingCow();
-      if (nearest) {
-        const d = dist(this.player, nearest);
+      const nearestEntity = this.nearestWanderingCow();
+      if (nearestEntity !== null) {
+        const nearestPos = this.world.must(nearestEntity, EcsPosition);
+        const d = dist(this.player, nearestPos);
         const inRange = d <= CAPTURE_DIST;
         if (d <= CAPTURE_DIST * 2) {
           const alpha = inRange
@@ -4637,10 +4616,11 @@ private preloadPlayerSprites() {
   // ─── Lasso ────────────────────────────────────────────────────────────────
 
   private renderLasso() {
-    if (!this.lasso.active || !this.lasso.cow) return;
+    if (!this.lasso.active || this.lasso.cowEntity === null || !this.world.isAlive(this.lasso.cowEntity)) return;
     const { ctx, lasso: l } = this;
+    const cowPos = this.world.must(l.cowEntity!, EcsPosition);
     const ps = this.isoToScreen(this.player.col, this.player.row);
-    const cs = this.isoToScreen(l.cow!.col, l.cow!.row);
+    const cs = this.isoToScreen(cowPos.col, cowPos.row);
     const t = l.phase === "throwing" ? l.throwT : 1;
     const ex = ps.x + (cs.x - ps.x) * t;
     const ey = ps.y - 30 + (cs.y - 20 - (ps.y - 30)) * t;
@@ -5148,7 +5128,7 @@ private preloadPlayerSprites() {
         ["🏠  Na base:", `${this.basedCount}`],
         [
           "🌾  Vagando:",
-          `${this.cows.filter((c) => c.state === "wandering" || c.state === "fleeing").length}`,
+          `${this.world.query(CowAI).filter(([, ai]) => ai.state === "wandering" || ai.state === "fleeing").length}`,
         ],
       ];
 
@@ -6160,16 +6140,17 @@ private preloadPlayerSprites() {
   // ─── Bandido ──────────────────────────────────────────────────────────────
 
   private debugSpawnBandit() {
-    const target =
-      this.cows.find((c) => c.state === "based") ??
-      this.cows.find((c) => c.state === "wandering");
-    if (!target) {
+    const basedEntry = this.world.query(EcsPosition, CowAI).find(([,, ai]) => ai.state === "based");
+    const wanderingEntry = this.world.query(EcsPosition, CowAI).find(([,, ai]) => ai.state === "wandering");
+    const entry = basedEntry ?? wanderingEntry;
+    if (!entry) {
       console.warn("[bandit] sem vaca alvo");
       return;
     }
+    const [, targetPos] = entry;
     // Spawn close to target cow, just slightly away
-    const spawnCol = target.col + 8;
-    const spawnRow = target.row + 8;
+    const spawnCol = targetPos.col + 8;
+    const spawnRow = targetPos.row + 8;
     const fleeCol = MAP_COLS - 2;
     const fleeRow = MAP_ROWS - 2;
     this.bandits.push({
@@ -6179,20 +6160,18 @@ private preloadPlayerSprites() {
       fleeCol,
       fleeRow,
       state: "approaching",
-      targetCow: target,
+      targetCow: this.cowCompat(entry[0]),
     });
   }
 
   private spawnBandit() {
-    const based = this.cows.filter((c) => c.state === "based");
-    const wandering =
-      based.length > 0
-        ? based
-        : this.cows.filter(
-            (c) => c.state === "wandering" || c.state === "fleeing",
-          );
-    if (wandering.length === 0) return;
-    const target = wandering[Math.floor(Math.random() * wandering.length)]!;
+    const basedEntries = this.world.query(EcsPosition, CowAI).filter(([,, ai]) => ai.state === "based");
+    const wanderingEntries = basedEntries.length > 0
+      ? basedEntries
+      : this.world.query(EcsPosition, CowAI).filter(([,, ai]) => ai.state === "wandering" || ai.state === "fleeing");
+    if (wanderingEntries.length === 0) return;
+    const targetEntry = wanderingEntries[Math.floor(Math.random() * wanderingEntries.length)]!;
+    const target = this.cowCompat(targetEntry[0]);
 
     // Spawn at the map edge closest to the target cow
     // (so the bandit doesn't have to cross the whole map)
@@ -6279,7 +6258,8 @@ private preloadPlayerSprites() {
         if (d < 2) {
           // Escaped — remove bandit and stolen cow
           if (b.targetCow) {
-            this.cows = this.cows.filter((c) => c !== b.targetCow);
+            const tc = b.targetCow as Cow & { _entity?: Entity };
+            if (tc._entity !== undefined) this.world.destroy(tc._entity);
           }
           this.bandits.splice(i, 1);
           continue;
@@ -6551,7 +6531,9 @@ private preloadPlayerSprites() {
     const { ctx, canvas, lasso } = this;
     const W = canvas.width,
       H = canvas.height;
-    const needed = lasso.cow?.type.clicksNeeded ?? 15;
+    const needed = (lasso.cowEntity !== null && this.world.isAlive(lasso.cowEntity))
+      ? this.world.must(lasso.cowEntity, CowTypeComp).cowType.clicksNeeded
+      : 15;
     const prog = lasso.clickCount / needed;
     const timeR = lasso.timeLeft / LASSO_TIME_LIMIT;
     const flash = lasso.flashTimer > 0;
