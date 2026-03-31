@@ -55,6 +55,27 @@ export class BanditAI {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Jogador remoto (multiplayer)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** ID de rede string (ex: WebSocket session id) */
+export class NetworkId {
+  constructor(public id: string) {}
+}
+
+/** Dados mutáveis do jogador remoto (atualizados por mensagens WS) */
+export class RemotePlayerData {
+  dirCol = 1;
+  dirRow = 0;
+  moving = false;
+  color = "#ffffff";
+  name = "Player";
+  herdCount = 0;
+  lastMessage?: string;
+  lastMessageTime?: number;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Contextos de sistema (shared read-only state passado para os Systems)
 // ─────────────────────────────────────────────────────────────────────────────
 
