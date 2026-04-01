@@ -9,6 +9,7 @@ import {
 
 export type TileType =
   | "grass"
+  | "grass_dark"
   | "dry_grass"
   | "dirt"
   | "sand"
@@ -193,22 +194,34 @@ export function generateMap(): Tile[][] {
       // Small water ponds from noise (keep sparse — rivers are the main water)
       if (large < 0.24 && medium < 0.42)
         return { type: "water", decoration: "none" };
-      if (large > 0.76 && medium > 0.62)
-        return { type: "rock", decoration: "none" };
 
       let type: TileType;
-      if (large > 0.68) type = fine > 0.55 ? "dry_grass" : "dirt";
-      else if (medium < 0.35) type = "sand";
-      else if (medium > 0.65) type = "dirt";
-      else type = "grass";
+
+      // Rock: clusters densos só onde large E medium são altos
+      if (large > 0.80 && medium > 0.68) {
+        type = "rock";
+      }
+      // Dirt: faixa estreita de transição ao redor das pedras
+      else if (large > 0.74) {
+        type = medium > 0.52 ? "dirt" : "dry_grass";
+      }
+      // Areia em áreas de medium baixo
+      else if (medium < 0.28) {
+        type = "sand";
+      }
+      // Grama: usa medium (escala ~7 tiles) para manchas suaves sem fragmentação
+      else {
+        type = medium > 0.54 ? "grass_dark" : "grass";
+      }
 
       let decoration: Tile["decoration"] = "none";
       const dRng = hash(c, r, seed + 3000);
-      if (type === "grass" && dRng < 0.06)
+      if ((type === "grass" || type === "grass_dark") && dRng < 0.06)
         decoration = dRng < 0.03 ? "tree" : "bush";
-      else if (type === "grass" && dRng > 0.93) decoration = "flower";
+      else if ((type === "grass" || type === "grass_dark") && dRng > 0.93) decoration = "flower";
       else if (type === "dry_grass" && dRng < 0.04) decoration = "cactus";
-      else if (type === "dirt" && dRng < 0.05) decoration = "boulder";
+      else if (type === "dirt" && dRng < 0.06) decoration = "boulder";
+      else if (type === "rock" && dRng < 0.08) decoration = "boulder";
 
       return { type, decoration };
     }),

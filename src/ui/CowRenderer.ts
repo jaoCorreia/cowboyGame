@@ -1,4 +1,5 @@
 import { sprites } from "../sprites";
+import { animatedSprites } from "../animatedSprites";
 import { drawCowAt } from "./drawUtils";
 import type { CowType } from "../cowTypes";
 import type { RemotePlayer } from "../network";
@@ -91,25 +92,47 @@ export class CowRenderer {
       ctx.fill();
     }
 
-    // Shadow
-    ctx.globalAlpha = isTranslucent ? 0.1 : ctx.globalAlpha * 0.7;
-    ctx.fillStyle = "#000";
-    ctx.beginPath();
-    ctx.ellipse(x, y + 4, 15, 7, 0, 0, Math.PI * 2);
-    ctx.fill();
+    // Shadow (skip for sprite-based cows — the GIF already has grounding)
+    if (!t.sprite) {
+      ctx.globalAlpha = isTranslucent ? 0.1 : ctx.globalAlpha * 0.7;
+      ctx.fillStyle = "#000";
+      ctx.beginPath();
+      ctx.ellipse(x, y + 4, 15, 7, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
     if (isTranslucent)
       ctx.globalAlpha = 0.55 + Math.sin(time * 2 + cow.id) * 0.1;
     else ctx.globalAlpha = prevAlpha;
 
-    const cowSprite = t.sprite ? sprites.get(t.sprite) : null;
-    const useSprite = !!cowSprite;
-
     const body = t.bodyColor;
     const spot = t.spotColor;
 
+    // Animated GIF or static sprite.
+    // Animation plays only while the cow is moving; idle = frame 0 (timeMs=0).
+    const isMoving = cow.state === "wandering" || cow.state === "fleeing" || cow.state === "captured";
+    const isGif = t.sprite?.endsWith(".gif") ?? false;
+    const animated = isGif && t.sprite
+      ? animatedSprites.get(t.sprite, isMoving ? time * 1000 : 0)
+      : null;
+    const cowSprite = !isGif && t.sprite ? sprites.get(t.sprite) : null;
+    const useSprite = !!(animated || cowSprite);
+
     if (useSprite) {
-      const sw = 52, sh = 52;
-      ctx.drawImage(cowSprite!, x - sw / 2, cy - sh + 4, sw, sh);
+      let srcW: number, srcH: number, src: CanvasImageSource;
+      if (animated) {
+        src = animated.canvas;
+        srcW = animated.w;
+        srcH = animated.h;
+      } else {
+        src = cowSprite!;
+        srcW = cowSprite!.naturalWidth || 52;
+        srcH = cowSprite!.naturalHeight || 52;
+      }
+      // Scale to a fixed display height, preserving aspect ratio.
+      // Anchor bottom of sprite at the cow's feet level (cy + 4).
+      const displayH = 44;
+      const displayW = srcW * (displayH / srcH);
+      ctx.drawImage(src, x - displayW / 2, cy - displayH + 4, displayW, displayH);
     } else {
       // Canvas drawing padrão
       ctx.fillStyle = body;

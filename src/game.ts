@@ -10,15 +10,9 @@ import {
   BASE_SLOT_GAP,
   COW_COUNT,
   PLAYER_SPEED,
-  COW_WANDER_SPEED,
-  COW_FLEE_SPEED,
-  HERD_FOLLOW_SPEED,
-  HERD_SPACING,
   CAPTURE_DIST,
   LASSO_TIME_LIMIT,
   LASSO_THROW_DURATION,
-  RARITY_COLORS,
-  RARITY_LABELS,
   STAKE_RANGE,
   STAKE_FLY_SPEED,
   STAKE_PULL_SPEED,
@@ -30,7 +24,6 @@ import {
   WOOD_DROP_MIN,
   WOOD_DROP_MAX,
   WOOD_MAX_STACK,
-  TREE_REGROW_TIME,
   STONE_HARVEST_DIST,
   STONE_DROP_MIN,
   STONE_DROP_MAX,
@@ -75,6 +68,15 @@ import { BanditRenderer, type BanditView } from "./ui/BanditRenderer";
 import { CowRenderer } from "./ui/CowRenderer";
 import { renderNightOverlay } from "./ui/NightOverlay";
 import { MapRenderer } from "./ui/MapRenderer";
+import {
+  drawBirthdayCake,
+  renderBirthdayParticles,
+  renderEventPopup,
+  renderStarterPackPopup,
+  renderBirthdayDialog,
+} from "./ui/BirthdayRenderer";
+import { renderStatsPanel, renderOnlinePanel, renderChat } from "./ui/HUDRenderer";
+import { renderAdminOverlay } from "./ui/AdminRenderer";
 
 
 interface Player {
@@ -1025,310 +1027,43 @@ export class Game {
   }
 
   private drawBirthdayCake() {
-    const { ctx } = this;
-    const t = this.cakeBobbingTimer;
-    const bob = Math.sin(t * 2.2) * 2.5;
-    const glow = 0.55 + Math.sin(t * 3.5) * 0.45;
-    const atCake = this.isAtCake();
-
-    const sx = (CAKE_COL - CAKE_ROW) * (TILE_W / 2) + this.camX;
-    const sy = (CAKE_COL + CAKE_ROW) * (TILE_H / 2) + this.camY + bob - 22;
-
-    ctx.save();
-    ctx.shadowColor = atCake ? "#FFD700" : "#FFB6C1";
-    ctx.shadowBlur = atCake ? 22 * glow : 10 * glow;
-
-    // Plate
-    ctx.fillStyle = "#c8902a";
-    ctx.beginPath();
-    ctx.ellipse(sx, sy + 30, 22, 7, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Bottom tier (chocolate)
-    ctx.fillStyle = "#5C2A0A";
-    ctx.fillRect(sx - 18, sy + 10, 36, 20);
-    ctx.fillStyle = "#FFB6C1";
-    ctx.beginPath();
-    for (let i = -15; i < 18; i += 7) ctx.arc(sx + i, sy + 12, 4, Math.PI, 0);
-    ctx.fill();
-
-    // Middle tier
-    ctx.fillStyle = "#8B1A1A";
-    ctx.fillRect(sx - 13, sy - 2, 26, 14);
-    ctx.fillStyle = "#FFFACD";
-    ctx.beginPath();
-    for (let i = -10; i < 13; i += 7) ctx.arc(sx + i, sy, 3.5, Math.PI, 0);
-    ctx.fill();
-
-    // Top tier
-    ctx.fillStyle = "#D2B48C";
-    ctx.fillRect(sx - 8, sy - 14, 16, 14);
-    ctx.fillStyle = "#FFA07A";
-    ctx.beginPath();
-    for (let i = -5; i < 8; i += 6) ctx.arc(sx + i, sy - 12, 3, Math.PI, 0);
-    ctx.fill();
-
-    // Contador de parabéns
-    ctx.shadowBlur = 0;
-    ctx.fillStyle = "#FFD700";
-    ctx.font = `bold ${this.birthdayParabensCount >= 100 ? "7" : "9"}px sans-serif`;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(String(this.birthdayParabensCount), sx, sy + 20);
-
-    // Candles (3)
-    const candleXs = [-6, 0, 6];
-    const candleColors = ["#FF6B6B", "#6BCB77", "#4D96FF"];
-    for (let ci = 0; ci < 3; ci++) {
-      const cx = sx + candleXs[ci]!;
-      ctx.fillStyle = candleColors[ci]!;
-      ctx.fillRect(cx - 2, sy - 26, 4, 12);
-      const flicker = Math.sin(t * 12 + ci * 2.3) * 1.2;
-      ctx.shadowColor = "#FF8800";
-      ctx.shadowBlur = 7;
-      ctx.fillStyle = "#FF8800";
-      ctx.beginPath();
-      ctx.ellipse(cx + flicker * 0.3, sy - 30, 2.5, 4, flicker * 0.15, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = "#FFEE44";
-      ctx.beginPath();
-      ctx.ellipse(cx + flicker * 0.2, sy - 31, 1.3, 2.5, flicker * 0.1, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.shadowBlur = 0;
-
-    if (atCake) {
-      ctx.fillStyle = "rgba(0,0,0,0.55)";
-      ctx.beginPath();
-      ctx.roundRect(sx - 62, sy - 56, 124, 20, 4);
-      ctx.fill();
-      ctx.fillStyle = "#FFD700";
-      ctx.font = "bold 10px sans-serif";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText("🎂 Pressione E", sx, sy - 46);
-    }
-    ctx.restore();
+    drawBirthdayCake({
+      ctx: this.ctx,
+      cakeCol: CAKE_COL,
+      cakeRow: CAKE_ROW,
+      camX: this.camX,
+      camY: this.camY,
+      cakeBobbingTimer: this.cakeBobbingTimer,
+      birthdayParabensCount: this.birthdayParabensCount,
+      atCake: this.isAtCake(),
+    });
   }
 
   private renderBirthdayParticles() {
-    if (this.birthdayParticles.length === 0) return;
-    const { ctx } = this;
-    ctx.save();
-    for (const p of this.birthdayParticles) {
-      ctx.globalAlpha = Math.max(0, p.life);
-      ctx.fillStyle = p.color;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-    ctx.restore();
+    renderBirthdayParticles(this.ctx, this.birthdayParticles);
   }
 
   private renderEventPopup(W: number, H: number) {
     if (this.isPreview || this.eventPopupDismissed || !this.isBirthdayActive) return;
-    const { ctx } = this;
-    const PW = Math.min(440, W - 40);
-    const PH = 215;
-    const PX = (W - PW) / 2;
-    const PY = (H - PH) / 2 - 20;
-
-    ctx.save();
-    ctx.fillStyle = "rgba(0,0,0,0.62)";
-    ctx.fillRect(0, 0, W, H);
-    this.drawPanel(PX, PY, PW, PH, 2);
-
-    // Stars row
-    ctx.fillStyle = "#FFD700";
-    ctx.font = "14px sans-serif";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    for (let i = 0; i < 7; i++) ctx.fillText("★", PX + 20 + i * ((PW - 40) / 6), PY + 18);
-
-    ctx.textBaseline = "alphabetic";
-    ctx.fillStyle = "#FFD700";
-    ctx.font = "bold 16px sans-serif";
-    ctx.fillText("🎂 EVENTO ESPECIAL: ANIVERSÁRIO DO CRIADOR!", W / 2, PY + 50);
-    ctx.fillStyle = "#FF9999";
-    ctx.font = "bold 13px sans-serif";
-    ctx.fillText("17 de Março — Feliz Aniversário, Joao! 🎉", W / 2, PY + 72);
-    ctx.fillStyle = "#FFE0A0";
-    ctx.font = "12px sans-serif";
-    ctx.fillText("Um bolo especial apareceu no mapa! 🌵 Encontre e envie", W / 2, PY + 96);
-    ctx.fillText("seus parabéns — todos online vão ver a mensagem! 🤠🐄", W / 2, PY + 114);
-
-    const ratio = Math.max(0, this.eventPopupTimer / 10);
-    ctx.fillStyle = "rgba(30,10,2,0.7)";
-    ctx.fillRect(PX + 20, PY + PH - 34, PW - 40, 10);
-    ctx.fillStyle = "#FFD700";
-    ctx.fillRect(PX + 20, PY + PH - 34, (PW - 40) * ratio, 10);
-    ctx.fillStyle = "#9b7e57";
-    ctx.font = "10px sans-serif";
-    ctx.fillText("Clique em qualquer lugar para fechar", W / 2, PY + PH - 10);
-    ctx.restore();
+    renderEventPopup({ ctx: this.ctx, canvas: { width: W, height: H }, eventPopupTimer: this.eventPopupTimer });
   }
 
   private renderStarterPackPopup(W: number, H: number) {
     if (this.isPreview || this.starterPackDismissed) return;
-    const { ctx } = this;
-    const PW = Math.min(340, W - 40);
-    const PH = 270;
-    const PX = (W - PW) / 2;
-    const PY = (H - PH) / 2;
-
-    ctx.save();
-
-    // Backdrop
-    ctx.fillStyle = "rgba(0,0,0,0.75)";
-    ctx.fillRect(0, 0, W, H);
-
-    // Panel glass
-    ctx.fillStyle = "rgba(12, 7, 2, 0.96)";
-    ctx.beginPath();
-    ctx.roundRect(PX, PY, PW, PH, 16);
-    ctx.fill();
-
-    // Gold border
-    ctx.strokeStyle = "rgba(210, 165, 45, 0.75)";
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.roundRect(PX + 0.75, PY + 0.75, PW - 1.5, PH - 1.5, 15.5);
-    ctx.stroke();
-
-    // Top glow
-    const topGrad = ctx.createLinearGradient(PX, PY, PX, PY + 70);
-    topGrad.addColorStop(0, "rgba(210,165,45,0.14)");
-    topGrad.addColorStop(1, "rgba(0,0,0,0)");
-    ctx.fillStyle = topGrad;
-    ctx.beginPath();
-    ctx.roundRect(PX + 2, PY + 2, PW - 4, 70, [14, 14, 0, 0]);
-    ctx.fill();
-
-    // Coin icon
-    ctx.font = "38px sans-serif";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText("🪙", W / 2, PY + 48);
-
-    // Title
-    ctx.fillStyle = "#FFD700";
-    ctx.font = "bold 17px sans-serif";
-    ctx.textBaseline = "alphabetic";
-    ctx.fillText("🎁 Starter Pack", W / 2, PY + 100);
-
-    // Description
-    ctx.fillStyle = "#D4B87A";
-    ctx.font = "13px sans-serif";
-    ctx.fillText("500 moedas para começar sua aventura!", W / 2, PY + 122);
-
-    // Price badge
-    const bw = 100, bh = 26, bx = W / 2 - 50, by = PY + 134;
-    ctx.fillStyle = "rgba(70, 38, 4, 0.9)";
-    ctx.beginPath();
-    ctx.roundRect(bx, by, bw, bh, 7);
-    ctx.fill();
-    ctx.strokeStyle = "rgba(200, 155, 40, 0.7)";
-    ctx.lineWidth = 1;
-    ctx.stroke();
-    ctx.fillStyle = "#FFD700";
-    ctx.font = "bold 13px sans-serif";
-    ctx.textBaseline = "middle";
-    ctx.fillText("R$ 10,00", W / 2, by + bh / 2);
-
-    // Buy button
-    const buyW = PW - 52, buyH = 42, buyX = PX + 26, buyY = PY + 178;
-    this.starterPackBuyBtn = { x: buyX, y: buyY, w: buyW, h: buyH };
-    const buyGrad = ctx.createLinearGradient(buyX, buyY, buyX, buyY + buyH);
-    buyGrad.addColorStop(0, "#d4960e");
-    buyGrad.addColorStop(1, "#7a4e06");
-    ctx.fillStyle = buyGrad;
-    ctx.beginPath();
-    ctx.roundRect(buyX, buyY, buyW, buyH, 10);
-    ctx.fill();
-    ctx.strokeStyle = "rgba(240, 190, 60, 0.6)";
-    ctx.lineWidth = 1;
-    ctx.stroke();
-    ctx.fillStyle = "#1a0a00";
-    ctx.font = "bold 14px sans-serif";
-    ctx.textBaseline = "middle";
-    ctx.fillText("💳  Comprar agora", W / 2, buyY + buyH / 2);
-
-    // Close link
-    const closeY = PY + PH - 16;
-    ctx.fillStyle = "rgba(140, 110, 65, 0.85)";
-    ctx.font = "12px sans-serif";
-    ctx.textBaseline = "middle";
-    ctx.fillText("Agora não", W / 2, closeY);
-    this.starterPackCloseBtn = { x: W / 2 - 44, y: closeY - 12, w: 88, h: 24 };
-
-    ctx.restore();
+    const btns = renderStarterPackPopup({ ctx: this.ctx, canvas: { width: W, height: H } });
+    this.starterPackBuyBtn = btns.buyBtn;
+    this.starterPackCloseBtn = btns.closeBtn;
   }
 
   private renderBirthdayDialog(W: number, H: number) {
     if (!this.birthdayDialogOpen) return;
-    const { ctx } = this;
-    const PW = Math.min(400, W - 40);
-    const PH = 248;
-    const PX = (W - PW) / 2;
-    const PY = (H - PH) / 2;
-
-    ctx.save();
-    ctx.fillStyle = "rgba(0,0,0,0.55)";
-    ctx.fillRect(0, 0, W, H);
-    this.drawPanel(PX, PY, PW, PH, 2);
-
-    ctx.font = "28px sans-serif";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText("🎂", W / 2, PY + 30);
-
-    ctx.textBaseline = "alphabetic";
-    ctx.fillStyle = "#FFD700";
-    ctx.font = "bold 15px sans-serif";
-    ctx.fillText("Bolo de Aniversário do Criador", W / 2, PY + 60);
-    ctx.fillStyle = "#FF9999";
-    ctx.font = "12px sans-serif";
-    ctx.fillText("17 de Março 🎉", W / 2, PY + 78);
-
-    if (this.birthdaySentParabens) {
-      ctx.fillStyle = "#6BCB77";
-      ctx.font = "bold 13px sans-serif";
-      ctx.fillText("🎊 Você já enviou seus parabéns!", W / 2, PY + 112);
-      ctx.fillStyle = "#FFE0A0";
-      ctx.font = "12px sans-serif";
-      ctx.fillText("O criador agradece de coração! 🤠🐄", W / 2, PY + 130);
-
-      const bw = 130, bh = 36;
-      const bx = W / 2 - bw / 2, by = PY + PH - 56;
-      this.birthdayCloseBtn = { x: bx, y: by, w: bw, h: bh };
-      this.birthdayConfirmBtn = { x: 0, y: 0, w: 0, h: 0 };
-      this.drawPixelBtn(bx, by, bw, bh, "normal");
-      ctx.fillStyle = "#FFD700";
-      ctx.font = "bold 13px sans-serif";
-      ctx.fillText("Fechar", W / 2, by + bh / 2 + 5);
-    } else {
-      ctx.fillStyle = "#FFE0A0";
-      ctx.font = "12px sans-serif";
-      ctx.fillText("Envie seus parabéns! Todos online vão ver a mensagem.", W / 2, PY + 106);
-
-      const bw = 210, bh = 40;
-      const bx = W / 2 - bw / 2, by = PY + PH - 100;
-      this.birthdayConfirmBtn = { x: bx, y: by, w: bw, h: bh };
-      this.drawPixelBtn(bx, by, bw, bh, "normal");
-      ctx.fillStyle = "#FFD700";
-      ctx.font = "bold 14px sans-serif";
-      ctx.fillText("🎂 Enviar Parabéns!", W / 2, by + bh / 2 + 5);
-
-      const cw = 120, ch = 32;
-      const cxb = W / 2 - cw / 2, cyb = PY + PH - 48;
-      this.birthdayCloseBtn = { x: cxb, y: cyb, w: cw, h: ch };
-      this.drawPixelBtn(cxb, cyb, cw, ch, "normal");
-      ctx.fillStyle = "#C8A870";
-      ctx.font = "13px sans-serif";
-      ctx.fillText("Talvez depois", W / 2, cyb + ch / 2 + 4);
-    }
-    ctx.restore();
+    const btns = renderBirthdayDialog({
+      ctx: this.ctx,
+      canvas: { width: W, height: H },
+      birthdaySentParabens: this.birthdaySentParabens,
+    });
+    this.birthdayConfirmBtn = btns.confirmBtn;
+    this.birthdayCloseBtn = btns.closeBtn;
   }
 
 private preloadPlayerSprites() {
@@ -2369,10 +2104,9 @@ private preloadPlayerSprites() {
         .filter(([, ai]) =>
           ai.state === "wandering" ||
           ai.state === "fleeing" ||
-          ai.state === "lassoed" ||
           ai.state === "herd",
         ).length;
-      if (active < COW_COUNT) {
+      if (active < COW_COUNT) { 
         this.spawnCowEntity(this.nextCowId++);
       }
       this.cowSpawnTimer = 45 + Math.random() * 30;
@@ -4128,345 +3862,45 @@ private preloadPlayerSprites() {
   // ── Admin overlay ─────────────────────────────────────────────────────────
 
   private renderAdminOverlay(W: number, H: number) {
-    const { ctx } = this;
-
-    // Badge "⚙ ADMIN" no canto superior direito (abaixo dos botões)
-    ctx.save();
-    ctx.font = "bold 11px monospace";
-    const badge = "⚙ ADMIN";
-    const bw = ctx.measureText(badge).width + 14;
-    const bx = W - bw - 6;
-    const by = 6;
-    ctx.fillStyle = "rgba(80,5,5,0.88)";
-    ctx.fillRect(bx, by, bw, 20);
-    ctx.strokeStyle = "#cc2222";
-    ctx.lineWidth = 1.5;
-    ctx.strokeRect(bx, by, bw, 20);
-    ctx.fillStyle = "#FF6666";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(badge, bx + bw / 2, by + 10);
-    ctx.textBaseline = "alphabetic";
-    ctx.restore();
-
-    // Indicador de god mode
-    if (this.adminGodMode) {
-      ctx.save();
-      ctx.font = "bold 11px monospace";
-      ctx.fillStyle = "rgba(80,5,5,0.88)";
-      const gw = ctx.measureText("⚡ GOD MODE").width + 14;
-      ctx.fillRect(W - gw - 6, 30, gw, 20);
-      ctx.strokeStyle = "#cc2222";
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(W - gw - 6, 30, gw, 20);
-      ctx.fillStyle = "#FFAA44";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText("⚡ GOD MODE", W - gw / 2 - 6, 40);
-      ctx.textBaseline = "alphabetic";
-      ctx.restore();
-    }
-
-    // Indicador de hora forçada
-    if (this.adminForcePeriod !== null) {
-      ctx.save();
-      ctx.font = "bold 10px monospace";
-      const label = `🕐 TIME:${this.adminForcePeriod.toUpperCase()}`;
-      const tw = ctx.measureText(label).width + 14;
-      const ty = this.adminGodMode ? 54 : 30;
-      ctx.fillStyle = "rgba(5,5,80,0.88)";
-      ctx.fillRect(W - tw - 6, ty, tw, 20);
-      ctx.strokeStyle = "#2244cc";
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(W - tw - 6, ty, tw, 20);
-      ctx.fillStyle = "#88AAFF";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(label, W - tw / 2 - 6, ty + 10);
-      ctx.textBaseline = "alphabetic";
-      ctx.restore();
-    }
-
-    // Resultado do último comando
-    if (this.adminCmdResultTimer > 0 && this.adminCmdResult) {
-      const alpha = Math.min(1, this.adminCmdResultTimer);
-      ctx.save();
-      ctx.globalAlpha = alpha;
-      ctx.font = "bold 13px monospace";
-      const msg = this.adminCmdResult;
-      const tw = ctx.measureText(msg).width + 16;
-      const px = 10;
-      const py = H - 40;
-      ctx.fillStyle = "rgba(40,3,3,0.94)";
-      ctx.fillRect(px, py - 18, tw, 24);
-      ctx.strokeStyle = "#cc2222";
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(px, py - 18, tw, 24);
-      ctx.fillStyle = this.adminCmdResult.startsWith("✅") ? "#88FF88" : "#FF8888";
-      ctx.textAlign = "left";
-      ctx.textBaseline = "middle";
-      ctx.fillText(msg, px + 8, py - 6);
-      ctx.textBaseline = "alphabetic";
-      ctx.restore();
-    }
-
-    // Dica de atalho (quando nenhum painel está aberto)
-    if (!this.adminCmdOpen && !this.shopOpen && !this.bookOpen && !this.inventoryOpen) {
-      ctx.save();
-      ctx.font = "10px monospace";
-      ctx.fillStyle = "rgba(255,100,100,0.5)";
-      ctx.textAlign = "left";
-      ctx.fillText("` = admin cmd", 10, H - 16);
-      ctx.restore();
-    }
+    renderAdminOverlay({
+      ctx: this.ctx,
+      canvas: { width: W, height: H },
+      adminGodMode: this.adminGodMode,
+      adminForcePeriod: this.adminForcePeriod,
+      adminCmdResult: this.adminCmdResult,
+      adminCmdResultTimer: this.adminCmdResultTimer,
+      adminCmdOpen: this.adminCmdOpen,
+      shopOpen: this.shopOpen,
+      bookOpen: this.bookOpen,
+      inventoryOpen: this.inventoryOpen,
+    });
   }
 
   // ── Painel de stats (top-left) ────────────────────────────────────────────
 
   private renderStatsPanel() {
-    const { ctx } = this;
-
-    if (this.statsMinimized) {
-      // ── Versão compacta (glass) ──
-      ctx.save();
-      ctx.fillStyle = "rgba(10, 6, 2, 0.84)";
-      ctx.beginPath();
-      ctx.roundRect(6, 6, 136, 38, 9);
-      ctx.fill();
-      ctx.strokeStyle = "rgba(180, 138, 45, 0.55)";
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.roundRect(6.5, 6.5, 135, 37, 8.5);
-      ctx.stroke();
-      ctx.restore();
-
-      ctx.fillStyle = this.myColor;
-      ctx.beginPath();
-      ctx.arc(20, 25, 4, 0, Math.PI * 2);
-      ctx.fill();
-
-      ctx.textAlign = "left";
-      ctx.font = "bold 12px sans-serif";
-      ctx.fillStyle = "#FFE0A0";
-      ctx.fillText(`🐄 ${this.herdCows().length}  🏠 ${this.basedCount}`, 30, 29);
-
-      // Botão expandir
-      ctx.save();
-      ctx.fillStyle = "rgba(180, 138, 45, 0.22)";
-      ctx.beginPath();
-      ctx.roundRect(111, 11, 22, 22, 5);
-      ctx.fill();
-      ctx.strokeStyle = "rgba(200,155,50,0.45)";
-      ctx.lineWidth = 1;
-      ctx.stroke();
-      ctx.restore();
-      ctx.fillStyle = "#FFD700";
-      ctx.font = "bold 11px sans-serif";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText("▶", 122, 22);
-      ctx.textBaseline = "alphabetic";
-    } else {
-      // ── Versão expandida (glass moderna) ──
-      const ownedItems = SHOP_ITEMS.filter(
-        (it) => (this.inventory.get(it.id) ?? 0) > 0,
-      );
-      const PW = 210;
-      const PH =
-        174 + (ownedItems.length > 0 ? 34 : 0) + (this.leiteTimer > 0 ? 20 : 0);
-
-      // Painel glass
-      ctx.save();
-      ctx.fillStyle = "rgba(10, 6, 2, 0.88)";
-      ctx.beginPath();
-      ctx.roundRect(6, 6, PW, PH, 11);
-      ctx.fill();
-      // Borda dourada fina
-      ctx.strokeStyle = "rgba(180, 138, 45, 0.52)";
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.roundRect(6.5, 6.5, PW - 1, PH - 1, 10.5);
-      ctx.stroke();
-      // Linha de brilho no topo
-      const topGrad = ctx.createLinearGradient(6, 6, 6 + PW, 6);
-      topGrad.addColorStop(0, "rgba(200,155,45,0)");
-      topGrad.addColorStop(0.5, "rgba(200,155,45,0.45)");
-      topGrad.addColorStop(1, "rgba(200,155,45,0)");
-      ctx.strokeStyle = topGrad;
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(20, 7);
-      ctx.lineTo(PW - 8, 7);
-      ctx.stroke();
-      ctx.restore();
-
-      // Cabeçalho: dot cor + nome
-      ctx.fillStyle = this.myColor;
-      ctx.beginPath();
-      ctx.arc(20, 22, 5, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.textAlign = "left";
-      ctx.font = "bold 13px sans-serif";
-      ctx.fillStyle = "#ffffff";
-      ctx.fillText(this.myName, 32, 26);
-
-      // Divisor
-      ctx.strokeStyle = "rgba(180,138,45,0.28)";
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(12, 33);
-      ctx.lineTo(PW - 6, 33);
-      ctx.stroke();
-
-      // Stats
-      const rows: [string, string][] = [
-        ["🐄  Rebanho:", `${this.herdCows().length}`],
-        ["🏠  Na base:", `${this.basedCount}`],
-        [
-          "🌾  Vagando:",
-          `${this.world.query(CowAI).filter(([, ai]) => ai.state === "wandering" || ai.state === "fleeing").length}`,
-        ],
-      ];
-
-      let ry = 48;
-      for (const [label, value] of rows) {
-        ctx.font = "12px sans-serif";
-        ctx.fillStyle = "rgba(195,155,80,0.85)";
-        ctx.textAlign = "left";
-        ctx.fillText(label, 14, ry);
-        ctx.fillStyle = "#FFE0A0";
-        ctx.textAlign = "right";
-        ctx.fillText(value, PW - 10, ry);
-        ry += 20;
-      }
-
-      // Período do dia
-      {
-        const period = this.timePeriod;
-        const periodLabel =
-          period === "noite"
-            ? this.nightFade < 0.8
-              ? "🌅 Anoitecendo..."
-              : "🌙 Noite"
-            : period === "manha"
-              ? "🌄 Manhã"
-              : "☀️ Tarde";
-        const periodColor =
-          period === "noite"
-            ? `rgba(160,190,255,${0.5 + this.nightFade * 0.5})`
-            : period === "manha"
-              ? "rgba(255,210,120,0.9)"
-              : "rgba(255,175,55,0.9)";
-        ctx.font = "11px sans-serif";
-        ctx.textAlign = "left";
-        ctx.fillStyle = periodColor;
-        ctx.fillText(periodLabel, 14, ry);
-        ry += 20;
-      }
-
-      // Moedas
-      ctx.drawImage(this.icons.moneyIcon, 14, ry - 14, 16, 16);
-      ctx.font = "bold 12px sans-serif";
-      ctx.fillStyle = "rgba(195,155,80,0.85)";
-      ctx.textAlign = "left";
-      ctx.fillText("Moedas:", 34, ry);
-      ctx.fillStyle = "#FFD700";
-      ctx.textAlign = "right";
-      ctx.fillText(`${this.coins}`, PW - 10, ry);
-      ry += 20;
-
-      // Botão "Comprar Moedas" (MercadoPago) — gradiente moderno
-      {
-        const btnX = 14, btnY = ry, btnW = PW - 20, btnH = 22;
-        ctx.save();
-        const btnGrad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
-        btnGrad.addColorStop(0, "rgba(190, 138, 18, 0.92)");
-        btnGrad.addColorStop(1, "rgba(100, 58, 6, 0.92)");
-        ctx.fillStyle = btnGrad;
-        ctx.beginPath();
-        ctx.roundRect(btnX, btnY, btnW, btnH, 5);
-        ctx.fill();
-        ctx.strokeStyle = "rgba(220, 170, 55, 0.6)";
-        ctx.lineWidth = 1;
-        ctx.stroke();
-        ctx.restore();
-        ctx.fillStyle = "#FFE060";
-        ctx.font = "bold 11px sans-serif";
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText("💳  Comprar Moedas  R$10", btnX + btnW / 2, btnY + btnH / 2);
-        ctx.textBaseline = "alphabetic";
-        ry += 28;
-      }
-
-      // Leite Fluorescente timer
-      if (this.leiteTimer > 0) {
-        const totalSecs = Math.ceil(this.leiteTimer);
-        const mins = Math.floor(totalSecs / 60);
-        const secs = totalSecs % 60;
-        const pulse = 0.7 + 0.3 * Math.sin(this.time * 3.5);
-        ctx.font = "bold 11px sans-serif";
-        ctx.textAlign = "left";
-        ctx.fillStyle = `rgba(140,255,100,${pulse})`;
-        ctx.fillText(
-          `✨ Leite: ${mins}m${secs < 10 ? "0" : ""}${secs}s`,
-          14,
-          ry,
-        );
-      }
-
-      // Botão logout — minimalista
-      ctx.save();
-      ctx.fillStyle = "rgba(110, 30, 30, 0.72)";
-      ctx.beginPath();
-      ctx.roundRect(PW - 40, 10, 20, 20, 5);
-      ctx.fill();
-      ctx.strokeStyle = "rgba(200, 80, 80, 0.45)";
-      ctx.lineWidth = 1;
-      ctx.stroke();
-      ctx.restore();
-      ctx.fillStyle = "#FF8080";
-      ctx.font = "bold 11px sans-serif";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText("⏻", PW - 30, 20);
-      ctx.textBaseline = "alphabetic";
-
-      // Botão recolher — minimalista
-      ctx.save();
-      ctx.fillStyle = "rgba(70, 52, 14, 0.72)";
-      ctx.beginPath();
-      ctx.roundRect(PW - 16, 10, 20, 20, 5);
-      ctx.fill();
-      ctx.strokeStyle = "rgba(180, 138, 45, 0.45)";
-      ctx.lineWidth = 1;
-      ctx.stroke();
-      ctx.restore();
-      ctx.fillStyle = "#FFD700";
-      ctx.font = "11px sans-serif";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText("◀", PW - 6, 20);
-      ctx.textBaseline = "alphabetic";
-    }
+    renderStatsPanel({
+      ctx: this.ctx,
+      statsMinimized: this.statsMinimized,
+      myColor: this.myColor,
+      myName: this.myName,
+      herdCount: this.herdCows().length,
+      basedCount: this.basedCount,
+      wanderingCount: this.world.query(CowAI).filter(([, ai]) => ai.state === "wandering" || ai.state === "fleeing").length,
+      timePeriod: this.timePeriod,
+      nightFade: this.nightFade,
+      coins: this.coins,
+      moneyIcon: this.icons.moneyIcon,
+      leiteTimer: this.leiteTimer,
+      time: this.time,
+      hasOwnedItems: SHOP_ITEMS.some((it) => (this.inventory.get(it.id) ?? 0) > 0),
+    });
   }
 
-  // ── Painel de jogadores online (top-right, separado) ─────────────────────
+  // ── Painel de jogadores online (top-left, abaixo do stats) ──────────────
 
   private renderOnlinePanel(W: number, _H: number) {
-    const { ctx } = this;
-    const remoteCount = this.remotePlayerEntities.size;
-    const total = remoteCount + 1;
-
-    // Só aparece quando há alguém conectado
-    if (remoteCount === 0) return;
-
-    // // Em mobile ocupa espaço demais — esconde se tela muito pequena
-    // if (W < 480) return;
-
-    // Lista: eu primeiro, depois remotos
-    type Entry = { color: string; name: string; isMe: boolean };
-    const entries: Entry[] = [
+    const players = [
       { color: this.myColor, name: this.myName + " (você)", isMe: true },
       ...this.world.query(RemotePlayerData, NetworkId).map(([, data]) => ({
         color: data.color,
@@ -4474,208 +3908,19 @@ private preloadPlayerSprites() {
         isMe: false,
       })),
     ];
-
-    const PW = 170;
-    const rowH = 22;
-    // Limita a 6 entradas visíveis para não cobrir o chat
-    const visibleEntries = entries.slice(0, 6);
-    const PH = 28 + visibleEntries.length * rowH + 8;
-
-    // Lado esquerdo, abaixo do painel de stats
-    const PX = 6;
-    const PY = this.statsMinimized ? 60 : 160;
-
-    // Glass panel
-    ctx.save();
-    ctx.fillStyle = "rgba(10, 6, 2, 0.84)";
-    ctx.beginPath();
-    ctx.roundRect(PX, PY, PW, PH, 9);
-    ctx.fill();
-    ctx.strokeStyle = "rgba(60, 190, 100, 0.35)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.roundRect(PX + 0.5, PY + 0.5, PW - 1, PH - 1, 8.5);
-    ctx.stroke();
-    ctx.restore();
-
-    // Cabeçalho
-    ctx.font = "bold 11px sans-serif";
-    ctx.textAlign = "left";
-    ctx.fillStyle = "#55FF99";
-    ctx.fillText(
-      `● Online  —  ${total} jogador${total > 1 ? "es" : ""}`,
-      PX + 10,
-      PY + 17,
-    );
-
-    // Divisor
-    ctx.strokeStyle = "rgba(60,190,100,0.2)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(PX + 8, PY + 22);
-    ctx.lineTo(PX + PW - 8, PY + 22);
-    ctx.stroke();
-
-    // Linhas de jogadores
-    let ey = PY + 22 + rowH - 4;
-    for (const e of visibleEntries) {
-      // Dot de cor
-      ctx.fillStyle = e.color;
-      ctx.beginPath();
-      ctx.arc(PX + 16, ey - 5, 5, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Nome
-      ctx.font = e.isMe ? "bold 11px sans-serif" : "11px sans-serif";
-      ctx.fillStyle = e.isMe ? "#FFE0A0" : "#C8A870";
-      ctx.textAlign = "left";
-
-      // Trunca nome se necessário
-      let name = e.name;
-      while (ctx.measureText(name).width > PW - 36 && name.length > 3) {
-        name = name.slice(0, -1);
-      }
-      if (name !== e.name) name += "…";
-
-      ctx.fillText(name, PX + 28, ey);
-      ey += rowH;
-    }
+    renderOnlinePanel({ ctx: this.ctx, statsMinimized: this.statsMinimized, players });
   }
 
   // ── Chat (bottom-left) ────────────────────────────────────────────────────
 
   private renderChat(W: number, H: number) {
-    const { ctx } = this;
-    const now = Date.now();
-
-    if (this.chatOpen) {
-      // ── Chat aberto: painel de histórico scrollável ─────────────────────────
-      const PW = Math.min(W - 20, 320);
-      const lineH = 18;
-      const padV = 8;
-      const MAX_VISIBLE = 8;
-      const msgs = this.chatMessages;
-      const totalMsgs = msgs.length;
-
-      // chatHistoryScroll: quantas mensagens acima do bottom estamos
-      this.chatHistoryScroll = Math.max(
-        0,
-        Math.min(this.chatHistoryScroll, Math.max(0, totalMsgs - MAX_VISIBLE)),
-      );
-
-      const firstIdx = Math.max(
-        0,
-        totalMsgs - MAX_VISIBLE - this.chatHistoryScroll,
-      );
-      const slice = msgs.slice(firstIdx, firstIdx + MAX_VISIBLE);
-
-      const panelH = Math.max(
-        lineH + padV * 2,
-        slice.length * lineH + padV * 2,
-      );
-      const panelY = H - 195 - panelH;
-
-      this.drawPanel(6, panelY, PW, panelH, 0);
-
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(8, panelY + 2, PW - 4, panelH - 4);
-      ctx.clip();
-
-      let ty = panelY + padV + 12;
-      for (const msg of slice) {
-        ctx.globalAlpha = 1;
-        ctx.font = " 11px sans-serif";
-        ctx.textAlign = "left";
-        ctx.fillStyle = msg.color;
-        const nameLabel = msg.name + ": ";
-        const nameW = ctx.measureText(nameLabel).width;
-        ctx.fillText(nameLabel, 14, ty);
-
-        ctx.font = "11px sans-serif";
-        ctx.fillStyle = "#FFE0A0";
-        const maxW = PW - nameW - 24;
-        let text = msg.text;
-        while (ctx.measureText(text).width > maxW && text.length > 3)
-          text = text.slice(0, -1);
-        if (text !== msg.text) text += "…";
-        ctx.fillText(text, 14 + nameW, ty);
-        ty += lineH;
-      }
-      ctx.restore();
-
-      // Scroll hint
-      if (this.chatHistoryScroll > 0) {
-        ctx.save();
-        ctx.globalAlpha = 0.8;
-        ctx.font = "10px sans-serif";
-        ctx.fillStyle = "#FFD700";
-        ctx.textAlign = "left";
-        ctx.fillText("▲ arraste ou use a roda para scroll", 14, panelY - 5);
-        ctx.restore();
-      }
-
-      ctx.save();
-      ctx.globalAlpha = 0.75;
-      ctx.font = "10px sans-serif";
-      ctx.fillStyle = "#FFD700";
-      ctx.textAlign = "left";
-      ctx.fillText("Enter = enviar  •  Esc = fechar", 14, H - 183);
-      ctx.restore();
-      return;
-    }
-
-    // ── Chat fechado: mensagens recentes flutuantes ─────────────────────────
-    const recent = this.chatMessages
-      .filter((m) => now - m.time < 12000)
-      .slice(-5);
-
-    if (recent.length === 0) {
-      ctx.save();
-      ctx.globalAlpha = 0.4;
-      ctx.font = "11px sans-serif";
-      ctx.fillStyle = "#C8A870";
-      ctx.textAlign = "left";
-      ctx.fillText("T = Chat", 14, H - 200);
-      ctx.restore();
-      return;
-    }
-
-    const PW = Math.min(W - 20, 272);
-    const lineH = 18;
-    const padV = 8;
-    const panelH = recent.length * lineH + padV * 2;
-    const panelY = H - 155 - panelH;
-
-    this.drawPanel(6, panelY, PW, panelH, 0);
-
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(8, panelY + 2, PW - 4, panelH - 4);
-    ctx.clip();
-
-    let ty = panelY + padV + 12;
-    for (const msg of recent) {
-      const age = (now - msg.time) / 12000;
-      ctx.globalAlpha = Math.max(0.35, 1 - age * 0.7);
-      ctx.font = "bold 11px sans-serif";
-      ctx.textAlign = "left";
-      ctx.fillStyle = msg.color;
-      const nameLabel = msg.name + ": ";
-      const nameW = ctx.measureText(nameLabel).width;
-      ctx.fillText(nameLabel, 14, ty);
-
-      ctx.font = "11px sans-serif";
-      ctx.fillStyle = "#FFE0A0";
-      const maxW = PW - nameW - 24;
-      let text = msg.text;
-      while (ctx.measureText(text).width > maxW && text.length > 3)
-        text = text.slice(0, -1);
-      if (text !== msg.text) text += "…";
-      ctx.fillText(text, 14 + nameW, ty);
-      ty += lineH;
-    }
-    ctx.restore();
+    this.chatHistoryScroll = renderChat({
+      ctx: this.ctx,
+      canvas: { width: W, height: H },
+      chatOpen: this.chatOpen,
+      chatMessages: this.chatMessages,
+      chatHistoryScroll: this.chatHistoryScroll,
+    });
   }
 
   // ── Botão do livro (top-right) ────────────────────────────────────────────
@@ -4795,7 +4040,8 @@ private preloadPlayerSprites() {
     const { ctx } = this;
     if (this.lasso.active) return;
 
-    const nearest = this.nearestWanderingCow();
+    const nearestEntity = this.nearestWanderingCow();
+    const nearestPos = nearestEntity !== null ? this.world.get(nearestEntity, EcsPosition) : null;
     const atBase = this.isAtBase(),
       hasHerd = this.herdCows().length > 0;
     const atVendor = this.isAtVendor();
@@ -4807,7 +4053,7 @@ private preloadPlayerSprites() {
       hint = isMobile ? "Botão: Depositar na base!" : "Pressione E / botão para DEPOSITAR na base!";
     else if (this.isBirthdayActive && this.isAtCake())
       hint = isMobile ? "🎂 Botão: Interagir com o bolo!" : "🎂 Pressione E para interagir com o BOLO DE ANIVERSÁRIO!";
-    else if (nearest && dist(this.player, nearest) <= CAPTURE_DIST)
+    else if (nearestPos && dist(this.player, nearestPos) <= CAPTURE_DIST)
       hint = isMobile ? "Botão: Laçar vaca!" : "Pressione E / botão para LAÇAR a vaca!";
 
     if (!hint) return;
@@ -5042,7 +4288,10 @@ private preloadPlayerSprites() {
       benchHubOpen: this.benchHubOpen,
       shopOpen: this.shopOpen,
       icons: this.icons,
-      nearestWanderingCow: () => this.nearestWanderingCow(),
+      nearestWanderingCow: () => {
+        const e = this.nearestWanderingCow();
+        return e !== null ? this.world.get(e, EcsPosition) : null;
+      },
       isAtBase: () => this.isAtBase(),
       isAtVendor: () => this.isAtVendor(),
       nearestBench: () => this.nearestBench(),

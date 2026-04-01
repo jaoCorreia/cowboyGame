@@ -27,7 +27,7 @@ export interface MinigameCtx {
   };
   time: number;
   clicksNeeded: number;
-  drawPixelBtn: (x: number, y: number, w: number, h: number, state: string, wide?: boolean) => void;
+  drawPixelBtn: (x: number, y: number, w: number, h: number, state: "normal" | "active" | "pressed", wide?: boolean) => void;
 }
 
 export class VendorRenderer {

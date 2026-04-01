@@ -12,34 +12,38 @@ export interface MapCtx {
   isoToScreen(col: number, row: number): IsoPoint;
 }
 
-// ── Tile colour/sprite lookup tables (moved from Game static members) ─────────
+// ── Tile colour lookup (used for 3D sides + tileset fallback) ────────────────
 
 const TILE_COLORS: Record<TileType, [string, string, string]> = {
-  grass:     ["#56a832", "#346018", "#446828"],
-  dry_grass: ["#a0b040", "#707020", "#888030"],
-  dirt:      ["#c89060", "#9a6838", "#b07848"],
-  sand:      ["#e8d090", "#c8a850", "#d8bc70"],
-  rock:      ["#8a8a8a", "#585858", "#6a6a6a"],
-  water:     ["#4a90d9", "#2a6090", "#3a7ab0"],
-  base:      ["#d4b070", "#a07838", "#c09048"],
+  grass:      ["#56a832", "#346018", "#446828"],
+  grass_dark: ["#4e9e2c", "#2e5614", "#3e6020"],
+  dry_grass:  ["#a0b040", "#707020", "#888030"],
+  dirt:       ["#c89060", "#9a6838", "#b07848"],
+  sand:       ["#e8d090", "#c8a850", "#d8bc70"],
+  rock:       ["#8a8a8a", "#585858", "#6a6a6a"],
+  water:      ["#4a90d9", "#2a6090", "#3a7ab0"],
+  base:       ["#d4b070", "#a07838", "#c09048"],
 };
 
-const TILE_SPRITES: Partial<Record<TileType, string>> = {
-  grass:     "tiles/tile_grass.png",
-  dry_grass: "tiles/tile_dry_grass.png",
-  dirt:      "tiles/tile_dirt.png",
-  sand:      "tiles/tile_sand.png",
-  rock:      "tiles/tile_rock.png",
-  base:      "tiles/tile_base.png",
+// ── Unified tileset: tiles/tileset.png — 9 tiles × 64px wide, 40px tall ──────
+//   Col: 0=grass  1=dry_grass  2=dirt  3=grass_dark  4=sand
+//        5=rock  6=water0  7=water1  8=base
+const TILESET_PATH = "tiles/tileset.png";
+const TILESET_TILE_W = 64; // each tile cell width in the strip
+
+const TILESET_INDEX: Partial<Record<TileType, number>> = {
+  grass:      0,
+  dry_grass:  2,
+  grass_dark: 1,
+  dirt:       3,
+  sand:       4,
+  rock:       5,
+  base:       8,
 };
 
-const TILE_SPRITES_ALT: Partial<Record<TileType, string>> = {
-  grass: "tiles/tile_grass_dark.png",
-};
-
-const TILE_ANIM: Partial<Record<TileType, { path: string; frames: number; fps: number }>> = {
-  water: { path: "tiles/tile_water_anim.png", frames: 4, fps: 4 },
-};
+const WATER_FRAME_START = 6;
+const WATER_FRAME_COUNT = 2;
+const WATER_FPS = 1;
 
 // ── MapRenderer class ─────────────────────────────────────────────────────────
 
@@ -200,6 +204,7 @@ export class MapRenderer {
     const { x, y } = this.view.isoToScreen(col, row);
     const hw = TILE_W / 2, hh = TILE_H / 2, depth = 7;
 
+    // ── 3D sides (always drawn procedurally) ─────────────────────────────────
     const [, sideL, sideR] = TILE_COLORS[tile.type];
     ctx.fillStyle = sideL;
     ctx.beginPath();
@@ -213,45 +218,32 @@ export class MapRenderer {
     ctx.lineTo(x + hw, y + depth); ctx.lineTo(x, y + hh + depth);
     ctx.closePath(); ctx.fill();
 
-    const isDark = (col + row) % 2 === 0;
-
-    const anim = TILE_ANIM[tile.type];
-    if (anim) {
-      const img = sprites.get(anim.path);
-      if (img) {
-        const frame = Math.floor(time * anim.fps) % anim.frames;
-        const frameW = img.width / anim.frames;
-        ctx.save();
-        this.clipToDiamond(ctx, x, y, hw, hh);
-        ctx.drawImage(img, frame * frameW, 0, frameW, img.height, x - hw, y - hh, TILE_W, TILE_H);
-        ctx.restore();
-        this.strokeDiamond(ctx, x, y, hw, hh);
-        return;
+    // ── Top face: unified tileset ─────────────────────────────────────────────
+    const tileset = sprites.get(TILESET_PATH);
+    if (tileset) {
+      let srcCol: number;
+      if (tile.type === "water") {
+        srcCol = WATER_FRAME_START + (Math.floor(time * WATER_FPS) % WATER_FRAME_COUNT);
+      } else {
+        const idx = TILESET_INDEX[tile.type];
+        if (idx === undefined) return;
+        srcCol = idx;
       }
+      ctx.save();
+      this.clipToDiamond(ctx, x, y, hw, hh);
+      ctx.drawImage(tileset, srcCol * TILESET_TILE_W, 0, TILESET_TILE_W, tileset.height, x - hw, y - hh, TILE_W, TILE_H);
+      ctx.restore();
+      this.strokeDiamond(ctx, x, y, hw, hh);
+      return;
     }
 
-    const altPath = isDark ? TILE_SPRITES_ALT[tile.type] : undefined;
-    const spritePath = altPath ?? TILE_SPRITES[tile.type];
-    if (spritePath) {
-      const img = sprites.get(spritePath);
-      if (img) {
-        ctx.save();
-        this.clipToDiamond(ctx, x, y, hw, hh);
-        ctx.drawImage(img, x - hw, y - hh, TILE_W, TILE_H);
-        ctx.restore();
-        this.strokeDiamond(ctx, x, y, hw, hh);
-        return;
-      }
-    }
-
+    // ── Color fallback while tileset loads ───────────────────────────────────
     let [top] = TILE_COLORS[tile.type];
     if (tile.type === "water") {
       const wave = Math.sin(time * 1.5 + (col + row) * 0.4) * 0.06;
       const b = Math.floor(0xd9 + wave * 0x30);
       top = `rgb(74,${b},${217 + Math.floor(wave * 20)})`;
     }
-    if (tile.type === "grass" && isDark) top = "#4e9e2c";
-
     ctx.fillStyle = top;
     ctx.beginPath();
     ctx.moveTo(x, y - hh); ctx.lineTo(x + hw, y);

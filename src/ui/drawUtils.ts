@@ -1,6 +1,7 @@
 // Pure canvas drawing utilities — no Game state required
 
 import { sprites } from "../sprites";
+import { animatedSprites } from "../animatedSprites";
 import type { CowType } from "../cowTypes";
 
 /**
@@ -155,10 +156,21 @@ export function drawCowAt(
   y: number,
   t: CowType,
 ): void {
-  const cowSprite = t.sprite ? sprites.get(t.sprite) : null;
-  if (cowSprite) {
-    const s = 52;
-    ctx.drawImage(cowSprite, x - s / 2, y - s + 4, s, s);
+  const isGif = t.sprite?.endsWith(".gif") ?? false;
+  const animated = isGif && t.sprite ? animatedSprites.get(t.sprite, Date.now()) : null;
+  const cowSprite = !isGif && t.sprite ? sprites.get(t.sprite) : null;
+  if (animated || cowSprite) {
+    let srcW: number, srcH: number, src: CanvasImageSource;
+    if (animated) {
+      src = animated.canvas; srcW = animated.w; srcH = animated.h;
+    } else {
+      src = cowSprite!;
+      srcW = cowSprite!.naturalWidth || 52;
+      srcH = cowSprite!.naturalHeight || 52;
+    }
+    const displayH = 44;
+    const displayW = srcW * (displayH / srcH);
+    ctx.drawImage(src, x - displayW / 2, y - displayH + 4, displayW, displayH);
     return;
   }
   const body = t.bodyColor,
