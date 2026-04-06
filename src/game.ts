@@ -70,6 +70,11 @@ import { drawPanel, drawPixelBtn, drawCowAt } from "./ui/drawUtils";
 import { BookRenderer } from "./ui/BookRenderer";
 import { ShopRenderer, type ShopCtx } from "./ui/ShopRenderer";
 import { MobileControlsRenderer, type MobileCtx } from "./ui/MobileControls";
+import { openSettingsPanel } from "./ui/SettingsPanel";
+import { ChatPanel } from "./ui/ChatPanel";
+import { BenchHubPanel } from "./ui/BenchHubPanel";
+import { ShopPanel } from "./ui/ShopPanel";
+import { InventoryPanel } from "./ui/InventoryPanel";
 import { InventoryRenderer, type InventoryCtx } from "./ui/InventoryRenderer";
 import { BenchHubRenderer } from "./ui/BenchHubRenderer";
 import { VendorRenderer } from "./ui/VendorRenderer";
@@ -233,6 +238,7 @@ export class Game {
   private banditAISystem = new BanditAISystem();
   private camX = 0;
   private camY = 0;
+  private zoom = 1; // definido em init() com base em mobile/desktop
   private icons;
   private keys = new Set<string>();
   private joystick: Joystick = {
@@ -267,6 +273,7 @@ export class Game {
   private myColor = "#3a5a9f";
   private myName = "Cowboy";
   private myToken = "";
+  private userData: UserData | null = null;
   private netSendTimer = 0;
   private saveTimer = 60;
   private cowSpawnTimer = 45; // tempo até o próximo spawn de vaca
@@ -298,7 +305,7 @@ export class Game {
   private leiteTimer = 0; // segundos restantes do leite fluorescente
   private chatMessages: Array<ChatMessage & { time: number }> = [];
   private chatOpen = false;
-  private chatInput?: HTMLInputElement;
+  private chatPanel?: ChatPanel;
   private myLastMessage = "";
   private myLastMessageTime = 0;
   private bookOpen = false;
@@ -438,6 +445,11 @@ export class Game {
   private tradeResultMsg = "";
   private tradeResultTimer = 0;
 
+  // HTML Panels
+  private benchHubPanelHtml!: BenchHubPanel;
+  private shopPanelHtml!: ShopPanel;
+  private inventoryPanelHtml!: InventoryPanel;
+
   // Events
   private birthdayForceState: "on" | "off" | null = null;
   private birthdaySentParabens = false;
@@ -500,6 +512,7 @@ export class Game {
       this.isPreview = true;
     } else {
       // Carrega dados persistidos do usuário
+      this.userData = userData;
       this.myToken = userData.token;
       this.myColor = userData.color;
       this.myName = userData.username;
@@ -581,7 +594,47 @@ export class Game {
     }
 
     this.statsMinimized = window.innerWidth < 500;
-    if (!this.isPreview) this.setupChatInput();
+    this.zoom = window.innerWidth < 600 ? 1 : 1.5; // mobile inalterado, desktop mais próximo
+    if (!this.isPreview) {
+      this.setupChatInput();
+      this.benchHubPanelHtml = new BenchHubPanel({
+        onCraft: (id) => { if (id === "machado") { this.craftMachado(); this._refreshBenchPanel(); } },
+        onPickup: () => { void this.pickupBench(this.activeBench!); },
+        onClose: () => { this.benchHubOpen = false; this.benchHubPanelHtml.close(); this.activeBench = null; },
+      });
+      this.shopPanelHtml = new ShopPanel({
+        onSellCow: (cow) => {
+          const found = this.herdCows().find(c => c.herdIndex === cow.herdIndex);
+          if (found) this.sellCow(found);
+          this._refreshShopPanel();
+        },
+        onSellAllHerd: () => { this.sellAllCows(); this._refreshShopPanel(); },
+        onSellCowBased: (cow) => {
+          const found = this.basedCows().find(c => c.herdIndex === cow.herdIndex);
+          if (found) this.sellBasedCow(found);
+          this._refreshShopPanel();
+        },
+        onSellAllBased: () => { this.sellAllBasedCows(); this._refreshShopPanel(); },
+        onBuyItem: (item) => { this.buyItem(item); this._refreshShopPanel(); },
+        onClose: () => { this.shopOpen = false; this.shopPanelHtml.close(); },
+      });
+      this.inventoryPanelHtml = new InventoryPanel({
+        onDrop: (item) => { this.dropItem(item); this._refreshInventoryPanel(); },
+        onTrade: (item) => { this.startTradeOffer(item); this._refreshInventoryPanel(); },
+        onPlace: (item) => { this.startPlacement(item); },
+        onUse: (item) => { this.useConsumable(item); this._refreshInventoryPanel(); },
+        onAcceptTrade: () => { this.acceptIncomingTrade(); this._refreshInventoryPanel(); },
+        onDeclineTrade: () => { this.declineIncomingTrade(); this._refreshInventoryPanel(); },
+        onCancelTrade: () => {
+          this.tradeState = "idle";
+          this.tradeItem = null;
+          this.tradeIncoming = null;
+          this._refreshInventoryPanel();
+        },
+        onSelectPlayer: (id) => { this.confirmTradeOffer(id); this._refreshInventoryPanel(); },
+        onClose: () => { this.inventoryOpen = false; this.inventoryPanelHtml.close(); },
+      });
+    }
     if (!this.isPreview && this.isAdmin) this.setupAdminInput();
     this.setupInput();
     this.resize();
@@ -647,8 +700,7 @@ export class Game {
           }
         },
         onChat: (msg) => {
-          this.chatMessages.push({ ...msg, time: Date.now() });
-          if (this.chatMessages.length > 50) this.chatMessages.shift();
+          this._pushChat({ ...msg, time: Date.now() });
           // Atualiza a última mensagem do jogador para exibir acima da cabeça
           const rpEntity = this.remotePlayerEntities.get(msg.id);
           if (rpEntity !== undefined) {
@@ -671,7 +723,8 @@ export class Game {
           if (!item) return;
           this.tradeIncoming = { ...offer, item };
           this.tradeState = "incoming";
-          this.inventoryOpen = true; // abre inventário para mostrar a oferta
+          this.inventoryOpen = true;
+          this._openInventoryPanel();
         },
         onTradeAccepted: (_fromId) => {
           // Transferir item para o outro jogador
@@ -685,12 +738,14 @@ export class Game {
           this.tradeResultTimer = 2.5;
           this.tradeItem = null;
           this.triggerSave();
+          this._refreshInventoryPanel();
         },
         onTradeDeclined: (_fromId) => {
           this.tradeResultMsg = "❌ Troca recusada.";
           this.tradeState = "result";
           this.tradeResultTimer = 2.0;
           this.tradeItem = null;
+          this._refreshInventoryPanel();
         },
         onObjectPlaced: (obj) => {
           // Evita duplicatas (ex: se o próprio jogador já adicionou localmente)
@@ -720,7 +775,7 @@ export class Game {
         },
         onPaymentSuccess: (coins) => {
           this.coins += coins;
-          this.chatMessages.push({
+          this._pushChat({
             id: "system",
             name: "⚙ Sistema",
             color: "#FFD700",
@@ -760,18 +815,88 @@ export class Game {
 
   destroy() {
     cancelAnimationFrame(this.rafId);
-    this.chatInput?.remove();
+    this.chatPanel?.destroy();
+    this.benchHubPanelHtml?.destroy();
+    this.shopPanelHtml?.destroy();
+    this.inventoryPanelHtml?.destroy();
     this.adminCmdInput?.remove();
   }
 
+  // ─── HTML Panel helpers ───────────────────────────────────────────────────
+
+  private _benchPanelData() {
+    const bench = this.activeBench!;
+    return {
+      type: bench.type,
+      owner: bench.owner,
+      ownerColor: bench.ownerColor,
+      isOwner: bench.owner === this.myName,
+      stone: this.inventory.get("stone") ?? 0,
+      coins: this.coins,
+      machado: this.inventory.get("machado") ?? 0,
+    };
+  }
+
+  private _shopPanelData() {
+    return {
+      coins: this.coins,
+      shopTab: this.shopTab,
+      herdCows: this.herdCows(),
+      basedCows: this.basedCows().sort((a, b) => a.herdIndex - b.herdIndex),
+      inventory: this.inventory,
+    };
+  }
+
+  private _inventoryPanelData() {
+    const onlinePlayers = this.world
+      .query(EcsPosition, RemotePlayerData, NetworkId)
+      .map(([entity]) => this.remotePlayerCompat(entity));
+    return {
+      inventory: this.inventory,
+      tradeState: this.tradeState,
+      tradeIncoming: this.tradeIncoming,
+      tradeItem: this.tradeItem,
+      tradeResultMsg: this.tradeResultMsg,
+      onlinePlayers,
+      leiteTimer: this.leiteTimer,
+    };
+  }
+
+  private _openBenchPanel() {
+    this.keys.clear();
+    if (this.benchHubPanelHtml && this.activeBench) this.benchHubPanelHtml.open(this._benchPanelData());
+  }
+
+  private _refreshBenchPanel() {
+    if (this.benchHubPanelHtml && this.activeBench) this.benchHubPanelHtml.refresh(this._benchPanelData());
+  }
+
+  private _openShopPanel() {
+    this.keys.clear();
+    if (this.shopPanelHtml) this.shopPanelHtml.open(this._shopPanelData());
+  }
+
+  private _refreshShopPanel() {
+    if (this.shopPanelHtml) this.shopPanelHtml.refresh(this._shopPanelData());
+  }
+
+  private _openInventoryPanel() {
+    this.keys.clear();
+    if (this.inventoryPanelHtml) this.inventoryPanelHtml.open(this._inventoryPanelData());
+  }
+
+  private _refreshInventoryPanel() {
+    if (this.inventoryPanelHtml) this.inventoryPanelHtml.refresh(this._inventoryPanelData());
+  }
+
+  private _pushChat(msg: ChatMessage & { time: number }) {
+    this.chatMessages.push(msg);
+    if (this.chatMessages.length > 200) this.chatMessages.shift();
+    this.chatPanel?.addMessage(msg);
+  }
+
   addSystemMessage(text: string) {
-    this.chatMessages.push({
-      id: "system",
-      name: "⚙ Sistema",
-      color: "#FFD700",
-      text,
-      time: Date.now(),
-    });
+    this._pushChat({ id: "system", name: "⚙ Sistema", color: "#FFD700", text, time: Date.now() });
   }
 
   private resize() {
@@ -782,60 +907,25 @@ export class Game {
   // ─── Input ────────────────────────────────────────────────────────────────
 
   private setupChatInput() {
-    const input = document.createElement("input");
-    input.type = "text";
-    input.placeholder = "Mensagem... (Enter=enviar, Esc=fechar)";
-    input.maxLength = 200;
-    Object.assign(input.style, {
-      position: "fixed",
-      bottom: "130px",
-      left: "10px",
-      width: "260px",
-      padding: "6px 10px",
-      background: "rgba(30,15,4,0.92)",
-      border: "2px solid #9b7e57",
-      borderRadius: "3px",
-      color: "#FFE0A0",
-      font: "13px sans-serif",
-      outline: "none",
-      display: "none",
-      zIndex: "10",
-      boxSizing: "border-box",
+    this.chatPanel = new ChatPanel(this.chatMessages);
+    this.chatPanel.onSend((text) => {
+      this.network?.sendChat(text);
+      this.myLastMessage = text;
+      this.myLastMessageTime = Date.now();
     });
-    input.addEventListener("keydown", (e) => {
-      e.stopPropagation();
-      if (e.key === "Enter") {
-        const text = input.value.trim();
-        if (text) {
-          this.network?.sendChat(text);
-          this.myLastMessage = text;
-          this.myLastMessageTime = Date.now();
-        }
-        input.value = "";
-      } else if (e.key === "Escape") {
-        this.closeChatInput();
-      }
-    });
-    // Sem blur automático — fechamento controlado pelo canvas
-    document.body.appendChild(input);
-    this.chatInput = input;
+    // Sincroniza chatOpen quando o painel é fechado pelo botão X do HTML
+    const origClose = this.chatPanel.close.bind(this.chatPanel);
+    this.chatPanel.close = () => { origClose(); this.chatOpen = false; };
   }
 
   private openChatInput() {
-    if (!this.chatInput) return;
     this.chatOpen = true;
-    this.chatInput.style.bottom = "155px";
-    this.chatInput.style.left = "10px";
-    this.chatInput.style.width = "300px";
-    this.chatInput.style.display = "block";
-    this.chatInput.value = "";
-    this.chatInput.focus();
+    this.chatPanel?.open();
   }
 
   private closeChatInput() {
-    if (!this.chatInput) return;
     this.chatOpen = false;
-    this.chatInput.style.display = "none";
+    this.chatPanel?.close();
   }
 
   // ─── Admin command bar ────────────────────────────────────────────────────
@@ -1221,7 +1311,54 @@ export class Game {
         e.preventDefault();
         return;
       }
+      if (this.isAdmin && e.key.toLowerCase() === "z") {
+        this.zoom = this.zoom > 1 ? 1 : 1.5;
+        e.preventDefault();
+        return;
+      }
       if (this.isPreview || this.chatOpen || this.adminCmdOpen) return;
+
+      // Escape always works to close any open panel
+      if (e.key === "Escape") {
+        if (document.getElementById("_settings_panel")) {
+          document.getElementById("_settings_panel")?.remove();
+          return;
+        }
+        if (this.placementMode) {
+          this.placementMode = null;
+          return;
+        }
+        if (this.benchHubOpen) {
+          this.benchHubOpen = false;
+          this.benchHubPanelHtml?.close();
+          this.activeBench = null;
+          return;
+        }
+        if (this.tradeState !== "idle") {
+          this.tradeState = "idle";
+          this.tradeItem = null;
+          this.tradeIncoming = null;
+          this._refreshInventoryPanel();
+          return;
+        }
+        if (this.inventoryOpen) {
+          this.inventoryOpen = false;
+          this.inventoryPanelHtml?.close();
+          return;
+        }
+        if (this.shopOpen) {
+          this.shopOpen = false;
+          this.shopPanelHtml?.close();
+          return;
+        }
+        if (this.stake.phase === "aiming") this.stake.phase = "idle";
+        else this.toggleBook();
+        return;
+      }
+
+      // Block all other shortcuts/movement while any overlay panel is open
+      if (document.getElementById("_settings_panel") || this.shopOpen || this.inventoryOpen || this.benchHubOpen) return;
+
       this.keys.add(e.key.toLowerCase());
       if (e.key === " " || e.key.toLowerCase() === "e") this.handleAction();
       if (e.key.toLowerCase() === "b") this.toggleBook();
@@ -1248,35 +1385,10 @@ export class Game {
         e.preventDefault();
         return;
       }
-      if (e.key === "Escape") {
-        if (this.placementMode) {
-          this.placementMode = null;
-          return;
-        }
-        if (this.benchHubOpen) {
-          this.benchHubOpen = false;
-          this.activeBench = null;
-          return;
-        }
-        if (this.tradeState !== "idle") {
-          this.tradeState = "idle";
-          this.tradeItem = null;
-          this.tradeIncoming = null;
-          return;
-        }
-        if (this.inventoryOpen) {
-          this.inventoryOpen = false;
-          return;
-        }
-        if (this.shopOpen) {
-          this.shopOpen = false;
-          return;
-        }
-        if (this.stake.phase === "aiming") this.stake.phase = "idle";
-        else this.toggleBook();
-      }
       if (e.key.toLowerCase() === "i") {
         this.inventoryOpen = !this.inventoryOpen;
+        if (this.inventoryOpen) this._openInventoryPanel();
+        else this.inventoryPanelHtml?.close();
         e.preventDefault();
       }
     });
@@ -1329,6 +1441,11 @@ export class Game {
             this.chatHistoryScroll - Math.sign(e.deltaY),
           );
           e.preventDefault();
+        } else if (this.canvas.width >= 600) {
+          // Zoom com scroll no desktop (pinch mantido no mobile via touch)
+          const factor = e.deltaY > 0 ? 0.9 : 1 / 0.9;
+          this.zoom = Math.max(1, Math.min(2.5, this.zoom * factor));
+          e.preventDefault();
         }
       },
       { passive: false },
@@ -1340,6 +1457,9 @@ export class Game {
       H = this.canvas.height;
     const x = e.clientX,
       y = e.clientY;
+    // Coordenadas no espaço do jogo (pré-zoom) — para hit tests no mundo
+    const gx = x / this.zoom,
+      gy = y / this.zoom;
 
     // Chat button — toggle (processado primeiro, antes de tudo)
     const chatBtnX = W - 80,
@@ -1449,12 +1569,13 @@ export class Game {
 
     // Shop interaction
     if (this.shopOpen) {
-      // Close button
+      // Close button (canvas fallback - HTML panel handles this primarily)
       if (
         Math.hypot(x - this.shopCloseBtn.x, y - this.shopCloseBtn.y) <
         this.shopCloseBtn.r + 6
       ) {
         this.shopOpen = false;
+        this.shopPanelHtml?.close();
         return;
       }
       // Tab buttons
@@ -1650,6 +1771,7 @@ export class Game {
         this.benchHubCloseBtn.r + 6
       ) {
         this.benchHubOpen = false;
+        this.benchHubPanelHtml?.close();
         this.activeBench = null;
         return;
       }
@@ -1690,7 +1812,11 @@ export class Game {
           this.tradeState = "idle";
           this.tradeItem = null;
           this.tradeIncoming = null;
-        } else this.inventoryOpen = false;
+          this._refreshInventoryPanel();
+        } else {
+          this.inventoryOpen = false;
+          this.inventoryPanelHtml?.close();
+        }
         return;
       }
       if (this.tradeState === "incoming") {
@@ -1830,14 +1956,16 @@ export class Game {
       y <= invBtnY + 30
     ) {
       this.inventoryOpen = !this.inventoryOpen;
+      if (this.inventoryOpen) this._openInventoryPanel();
+      else this.inventoryPanelHtml?.close();
       return;
     }
 
     // Book button (top-right HUD area)
-    const musicBtnX = W - 120,
-      musicBtnY = 50;
-    if (Math.hypot(x - musicBtnX, y - musicBtnY) < 26) {
-      this.toggleMusic();
+    const settingsBtnX = W - 120,
+      settingsBtnY = 50;
+    if (Math.hypot(x - settingsBtnX, y - settingsBtnY) < 26) {
+      this.openSettings();
       return;
     }
     const bookBtnX = W - 50,
@@ -1872,7 +2000,7 @@ export class Game {
     // Stake aiming — click on map to throw
     // Modo de posicionamento — clique no mapa para colocar bancada
     if (this.placementMode) {
-      const iso = this.screenToIso(x, y);
+      const iso = this.screenToIso(gx, gy);
       const tileCol = Math.floor(iso.col);
       const tileRow = Math.floor(iso.row);
       if (this.isPlacementValid(tileCol, tileRow)) {
@@ -1882,7 +2010,7 @@ export class Game {
     }
 
     if (this.stake.phase === "aiming") {
-      this.throwStakeTo(x, y);
+      this.throwStakeTo(gx, gy);
       return;
     }
 
@@ -1899,7 +2027,7 @@ export class Game {
       if (ai.state !== "wandering") continue;
       const s = this.isoToScreen(pos.col, pos.row);
       if (
-        Math.hypot(x - s.x, y - (s.y - 12)) < 34 &&
+        Math.hypot(gx - s.x, gy - (s.y - 12)) < 34 &&
         Math.hypot(pos.col - this.player.col, pos.row - this.player.row) <=
           this.effectiveCaptureRange
       ) {
@@ -1912,7 +2040,7 @@ export class Game {
 
   private onPointerMove(e: PointerEvent) {
     // Rastreia tile sob o cursor para preview de posicionamento
-    const iso = this.screenToIso(e.clientX, e.clientY);
+    const iso = this.screenToIso(e.clientX / this.zoom, e.clientY / this.zoom);
     this.mouseTileCol = Math.floor(iso.col);
     this.mouseTileRow = Math.floor(iso.row);
 
@@ -1970,11 +2098,13 @@ export class Game {
         this.vendorDialog.active = false;
         this.shopOpen = true;
         this.shopBuyScroll = 0;
+        this._openShopPanel();
       }
       return;
     }
     if (this.benchHubOpen) {
       this.benchHubOpen = false;
+      this.benchHubPanelHtml?.close();
       this.activeBench = null;
       return;
     }
@@ -1990,6 +2120,7 @@ export class Game {
     }
     if (this.shopOpen) {
       this.shopOpen = false;
+      this.shopPanelHtml?.close();
       return;
     }
     if (this.bookOpen) return;
@@ -2021,6 +2152,7 @@ export class Game {
       // E = Interagir (abrir hub de criação)
       this.activeBench = nearBench;
       this.benchHubOpen = true;
+      this._openBenchPanel();
       return;
     }
     if (this.isAtVendor()) {
@@ -2040,6 +2172,7 @@ export class Game {
       this.shopOpen = true;
       this.shopBuyScroll = 0;
       this.discoveredNPCs.add("vendedor");
+      this._openShopPanel();
       return;
     }
     if (this.isAtBase() && this.herdCows().length > 0) {
@@ -2074,6 +2207,7 @@ export class Game {
     this.bookOpen = !this.bookOpen;
     if (this.bookOpen) {
       this.shopOpen = false;
+      this.shopPanelHtml?.close();
       this.bookPage = 0;
       this.bookPageTarget = 0;
       this.bookPageAnimT = 1;
@@ -2193,7 +2327,7 @@ export class Game {
     // Trade result timer
     if (this.tradeState === "result" && this.tradeResultTimer > 0) {
       this.tradeResultTimer -= dt;
-      if (this.tradeResultTimer <= 0) this.tradeState = "idle";
+      if (this.tradeResultTimer <= 0) { this.tradeState = "idle"; this._refreshInventoryPanel(); }
     }
     if (this.adminCmdResultTimer > 0) this.adminCmdResultTimer -= dt;
 
@@ -2393,8 +2527,8 @@ export class Game {
   private updateCamera() {
     const sx = (this.player.col - this.player.row) * (TILE_W / 2);
     const sy = (this.player.col + this.player.row) * (TILE_H / 2);
-    this.camX = this.canvas.width / 2 - sx;
-    this.camY = this.canvas.height / 2 - sy - 40;
+    this.camX = this.canvas.width / (2 * this.zoom) - sx;
+    this.camY = this.canvas.height / (2 * this.zoom) - sy - 40;
   }
 
   private updatePlayer(dt: number) {
@@ -3038,6 +3172,7 @@ export class Game {
   private startPlacement(item: GameItem) {
     this.placementMode = item.id;
     this.inventoryOpen = false;
+    this.inventoryPanelHtml?.close();
   }
 
   private useConsumable(item: GameItem) {
@@ -3099,6 +3234,7 @@ export class Game {
     // Remove localmente
     this.placedObjects = this.placedObjects.filter((o) => o.id !== obj.id);
     this.benchHubOpen = false;
+    this.benchHubPanelHtml?.close();
     this.activeBench = null;
     this.triggerSave();
   }
@@ -3323,8 +3459,8 @@ export class Game {
 
   private visibleTileRange() {
     const { camX: cx, camY: cy } = this;
-    const W = this.canvas.width,
-      H = this.canvas.height;
+    const W = this.canvas.width / this.zoom,
+      H = this.canvas.height / this.zoom;
     const hw = TILE_W / 2,
       hh = TILE_H / 2;
     const buf = 3;
@@ -3353,12 +3489,15 @@ export class Game {
     ctx.fillStyle = g;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
+    ctx.save();
+    ctx.scale(this.zoom, this.zoom);
     this.renderMap();
     this.renderStakeAimRing(); // range ring drawn under entities
     this.renderEntities();
     this.renderLasso();
     this.renderStake();
     this.renderBandits();
+    ctx.restore();
     this.renderNightOverlay();
     // Flash verde ao cortar árvore
     if (this.chopFlash > 0) {
@@ -3415,8 +3554,6 @@ export class Game {
     }
     if (this.bookOpen) this.renderBook();
     else this.renderUI();
-    if (this.shopOpen) this.renderShop();
-    if (this.benchHubOpen && this.activeBench) this.renderBenchHub();
   }
 
   // ─── Tile drawing ─────────────────────────────────────────────────────────
@@ -4122,10 +4259,9 @@ export class Game {
     this.renderStatsPanel();
     this.renderOnlinePanel(W, H);
     this.renderBookButton(W);
-    this.renderMusicButton(W);
+    this.renderSettingsButton(W);
     this.renderInventoryButton(W, H);
     this.renderChat(W, H);
-    if (this.inventoryOpen) this.renderInventory(W, H);
 
     // ── Vendor dialog ────────────────────────────────────────────────────────
     if (this.vendorDialog.active) this.renderVendorDialog();
@@ -4142,7 +4278,6 @@ export class Game {
     }
 
     this.renderBenchActions(W, H);
-    this.renderContextHint(W, H);
     this.renderMobileControls();
 
     // Dicas de teclado (desktop)
@@ -4233,12 +4368,14 @@ export class Game {
   }
 
   // ── Chat (bottom-left) ────────────────────────────────────────────────────
+  // Só renderiza mensagens flutuantes quando o painel HTML está fechado
 
   private renderChat(W: number, H: number) {
+    if (this.chatPanel?.isOpen) return;
     this.chatHistoryScroll = renderChat({
       ctx: this.ctx,
       canvas: { width: W, height: H },
-      chatOpen: this.chatOpen,
+      chatOpen: false, // painel HTML cuida do estado aberto
       chatMessages: this.chatMessages,
       chatHistoryScroll: this.chatHistoryScroll,
     });
@@ -4254,26 +4391,23 @@ export class Game {
     toggleMusic();
   }
 
-  private renderMusicButton(W: number) {
+  private openSettings() {
+    if (!this.userData) return;
+    openSettingsPanel(this.userData, () => { /* music state changed, UI auto-updates */ });
+  }
+
+  private renderSettingsButton(W: number) {
     const { ctx } = this;
-    const cx = W - 120,
-      cy = 50;
-    this.drawPixelBtn(
-      cx - 24,
-      cy - 24,
-      48,
-      48,
-      isMusicEnabled() ? "normal" : "pressed",
-    );
-    ctx.font = "20px sans-serif";
+    const cx = W - 120, cy = 50;
+    this.drawPixelBtn(cx - 24, cy - 24, 48, 48, "normal");
+    ctx.font = "22px sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText(isMusicEnabled() ? "🎵" : "🔇", cx, cy);
+    ctx.fillText("⚙", cx, cy);
     ctx.textBaseline = "alphabetic";
-    ctx.fillStyle = isMusicEnabled() ? "#FFD700" : "#888";
+    ctx.fillStyle = "#C8A870";
     ctx.font = "bold 8px sans-serif";
-    ctx.textAlign = "center";
-    ctx.fillText("MÚSICA", cx, cy + 20);
+    ctx.fillText("CONFIG", cx, cy + 20);
   }
 
   private renderBookButton(W: number) {
@@ -4358,50 +4492,6 @@ export class Game {
   private renderBenchActions(_W: number, _H: number) {
     this.benchInteractBtn = { x: 0, y: 0, w: 0, h: 0 };
     this.benchCollectBtn = { x: 0, y: 0, w: 0, h: 0 };
-  }
-
-  // ── Hint contextual ───────────────────────────────────────────────────────
-
-  private renderContextHint(W: number, H: number) {
-    const { ctx } = this;
-    if (this.lasso.active) return;
-
-    const nearestEntity = this.nearestWanderingCow();
-    const nearestPos =
-      nearestEntity !== null
-        ? this.world.get(nearestEntity, EcsPosition)
-        : null;
-    const atBase = this.isAtBase(),
-      hasHerd = this.herdCows().length > 0;
-    const atVendor = this.isAtVendor();
-    let hint = "";
-    const isMobile = W < 600;
-    if (atVendor && !this.shopOpen)
-      hint = isMobile
-        ? "Botão: Abrir Loja!"
-        : "Pressione E / botão para abrir a LOJA!";
-    else if (atBase && hasHerd)
-      hint = isMobile
-        ? "Botão: Depositar na base!"
-        : "Pressione E / botão para DEPOSITAR na base!";
-    else if (this.isBirthdayActive && this.isAtCake())
-      hint = isMobile
-        ? "🎂 Botão: Interagir com o bolo!"
-        : "🎂 Pressione E para interagir com o BOLO DE ANIVERSÁRIO!";
-    else if (nearestPos && dist(this.player, nearestPos) <= CAPTURE_DIST)
-      hint = isMobile
-        ? "Botão: Laçar vaca!"
-        : "Pressione E / botão para LAÇAR a vaca!";
-
-    if (!hint) return;
-
-    ctx.font = `bold ${isMobile ? 14 : 13}px sans-serif`;
-    ctx.textAlign = "center";
-    const tw = ctx.measureText(hint).width;
-    const hpw = Math.min(tw + 48, W - 20);
-    this.drawPixelBtn(W / 2 - hpw / 2, H - 120, hpw, 40, "normal", true);
-    ctx.fillStyle = "#FFD700";
-    ctx.fillText(hint, W / 2, H - 94);
   }
 
   // ─── Bandido ──────────────────────────────────────────────────────────────

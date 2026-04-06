@@ -12,6 +12,11 @@ export interface UserData {
   coins: number;
   inventory: Record<string, number>; // itemId → level
   isAdmin?: boolean;
+  // campos de perfil (opcionais, populados pelo /auth/profile)
+  email?: string | null;
+  hasPassword?: boolean;
+  googleLinked?: boolean;
+  githubLinked?: boolean;
 }
 
 const TOKEN_KEY = "cowboy_token";

@@ -43,7 +43,8 @@ export class MobileControlsRenderer {
     const jx = 88,
       jy = H - 90;
 
-    // ── Virtual joystick (craftpix palette: brown tones) ──────────────────────
+    // ── Virtual joystick (mobile only) ───────────────────────────────────────
+    if (W < 600) {
     ctx.fillStyle = "rgba(60,30,8,0.55)";
     ctx.strokeStyle = "#a87040";
     ctx.lineWidth = 3;
@@ -78,6 +79,7 @@ export class MobileControlsRenderer {
     ctx.arc(jtx, jty, 24, 0, Math.PI * 2);
     ctx.stroke();
     ctx.textBaseline = "alphabetic";
+    } // end joystick mobile-only
 
     // ── Action button (bottom-right) ──────────────────────────────────────────
     const ax = W - 80,

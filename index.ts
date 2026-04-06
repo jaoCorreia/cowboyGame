@@ -94,6 +94,7 @@ await users.createIndex({ githubId: 1 }, { unique: true, sparse: true });
 interface OAuthStateDoc {
   _id: string; // state UUID
   expiresAt: Date;
+  linkToken?: string; // se presente, modo de vinculação
 }
 const oauthStatesColl = db.collection<OAuthStateDoc>("oauthStates");
 await oauthStatesColl.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
@@ -117,7 +118,7 @@ async function getSession(token: string): Promise<Session | null> {
 async function createSession(token: string, sess: Session): Promise<void> {
   await sessionsColl.replaceOne(
     { _id: token },
-    { _id: token, ...sess, expiresAt: new Date(Date.now() + SESSION_TTL_MS) },
+    { _id: token, ...sess, expiresAt: new Date(Date.now() + SESSION_TTL_MS) } as unknown as SessionDoc,
     { upsert: true },
   );
 }
@@ -244,6 +245,20 @@ async function sendMagicLink(email: string, rawToken: string, purpose: "login" |
   );
 }
 
+/** Redireciona para o jogo com parâmetro de erro OAuth. */
+function oauthError(code: string) {
+  return Response.redirect(`${APP_URL}/?error=${code}`, 302);
+}
+
+/** Retorna uma página que envia postMessage para a janela pai e fecha o popup. */
+function oauthPopupResult(type: "linked" | "error", detail: string) {
+  const html = `<!DOCTYPE html><html><body><script>
+    try { window.opener.postMessage(${JSON.stringify({ type, detail })}, '*'); } catch(e){}
+    window.close();
+  </script></body></html>`;
+  return new Response(html, { headers: { "Content-Type": "text/html" } });
+}
+
 /** Gera hash SHA-256 de uma string e retorna em hex. */
 async function sha256hex(input: string): Promise<string> {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
@@ -270,6 +285,7 @@ interface UserDoc {
   githubId?: string | null;
   magicTokenHash?: string | null;
   magicTokenExpires?: Date | null;
+  avatarUrl?: string | null;
 }
 
 interface Session {
@@ -471,8 +487,13 @@ server = Bun.serve<WsData>({
     "/auth/google": async (req: Request) => {
       if (!GOOGLE_CLIENT_ID)
         return new Response("Google OAuth não configurado.", { status: 501 });
+      const linkToken = new URL(req.url).searchParams.get("link") ?? "";
       const state = crypto.randomUUID();
-      await oauthStatesColl.insertOne({ _id: state, expiresAt: new Date(Date.now() + 10 * 60_000) });
+      await oauthStatesColl.insertOne({
+        _id: state,
+        expiresAt: new Date(Date.now() + 10 * 60_000),
+        ...(linkToken ? { linkToken } : {}),
+      } as OAuthStateDoc);
       const params = new URLSearchParams({
         client_id: GOOGLE_CLIENT_ID,
         redirect_uri: `${APP_URL}/auth/google/callback`,
@@ -489,11 +510,10 @@ server = Bun.serve<WsData>({
       const state = url.searchParams.get("state");
       const errParam = url.searchParams.get("error");
       if (errParam || !code || !state)
-        return Response.redirect(`${APP_URL}/?error=oauth_cancelled`, 302);
+        return oauthError("oauth_cancelled");
 
       const stateDoc = await oauthStatesColl.findOneAndDelete({ _id: state });
-      if (!stateDoc)
-        return Response.redirect(`${APP_URL}/?error=oauth_state_invalid`, 302);
+      if (!stateDoc) return oauthError("oauth_state_invalid");
 
       // Trocar code por tokens
       const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
@@ -507,17 +527,26 @@ server = Bun.serve<WsData>({
           grant_type: "authorization_code",
         }),
       });
-      if (!tokenRes.ok)
-        return Response.redirect(`${APP_URL}/?error=oauth_token_failed`, 302);
+      if (!tokenRes.ok) return oauthError("oauth_token_failed");
 
       const tokenData = (await tokenRes.json()) as { id_token?: string; error?: string };
-      if (!tokenData.id_token)
-        return Response.redirect(`${APP_URL}/?error=oauth_no_id_token`, 302);
+      if (!tokenData.id_token) return oauthError("oauth_no_id_token");
 
-      // Decodificar JWT payload (sem verificar assinatura — confiar no HTTPS)
       const jwtPayload = JSON.parse(
         Buffer.from(tokenData.id_token.split(".")[1]!, "base64url").toString("utf8"),
       ) as { sub: string; email?: string; name?: string };
+
+      // Modo vinculação: associa Google a conta existente
+      const linkToken = (stateDoc as OAuthStateDoc & { linkToken?: string }).linkToken;
+      if (linkToken) {
+        const sess = await getSession(linkToken);
+        if (!sess) return oauthPopupResult("error", "Sessão expirada.");
+        const already = await users.findOne({ googleId: jwtPayload.sub }) as UserDoc | null;
+        if (already && already._id.toString() !== sess.userId)
+          return oauthPopupResult("error", "Este Google já está vinculado a outra conta.");
+        await users.updateOne({ _id: new ObjectId(sess.userId) }, { $set: { googleId: jwtPayload.sub } });
+        return oauthPopupResult("linked", "google");
+      }
 
       const user = await upsertOAuthUser({
         provider: "google",
@@ -525,7 +554,6 @@ server = Bun.serve<WsData>({
         email: jwtPayload.email ?? null,
         displayName: jwtPayload.name ?? jwtPayload.email ?? "Vaqueiro",
       });
-
       const { payload } = await loginUser(user);
       return Response.redirect(`${APP_URL}/?session=${payload.token}`, 302);
     },
@@ -535,8 +563,13 @@ server = Bun.serve<WsData>({
     "/auth/github": async (req: Request) => {
       if (!GITHUB_CLIENT_ID)
         return new Response("GitHub OAuth não configurado.", { status: 501 });
+      const linkToken = new URL(req.url).searchParams.get("link") ?? "";
       const state = crypto.randomUUID();
-      await oauthStatesColl.insertOne({ _id: state, expiresAt: new Date(Date.now() + 10 * 60_000) });
+      await oauthStatesColl.insertOne({
+        _id: state,
+        expiresAt: new Date(Date.now() + 10 * 60_000),
+        ...(linkToken ? { linkToken } : {}),
+      } as OAuthStateDoc);
       const params = new URLSearchParams({
         client_id: GITHUB_CLIENT_ID,
         redirect_uri: `${APP_URL}/auth/github/callback`,
@@ -590,13 +623,24 @@ server = Bun.serve<WsData>({
         email = emails.find((e) => e.primary && e.verified)?.email ?? emails[0]?.email ?? null;
       }
 
+      // Modo vinculação
+      const linkToken = (stateDoc as OAuthStateDoc & { linkToken?: string }).linkToken;
+      if (linkToken) {
+        const sess = await getSession(linkToken);
+        if (!sess) return oauthPopupResult("error", "Sessão expirada.");
+        const already = await users.findOne({ githubId: String(profile.id) }) as UserDoc | null;
+        if (already && already._id.toString() !== sess.userId)
+          return oauthPopupResult("error", "Este GitHub já está vinculado a outra conta.");
+        await users.updateOne({ _id: new ObjectId(sess.userId) }, { $set: { githubId: String(profile.id) } });
+        return oauthPopupResult("linked", "github");
+      }
+
       const user = await upsertOAuthUser({
         provider: "github",
         providerId: String(profile.id),
         email,
         displayName: profile.name ?? profile.login,
       });
-
       const { payload } = await loginUser(user);
       return Response.redirect(`${APP_URL}/?session=${payload.token}`, 302);
     },
@@ -674,6 +718,97 @@ server = Bun.serve<WsData>({
       });
 
       await sendMagicLink(normalized, rawToken, "verify");
+      return Response.json({ ok: true });
+    },
+
+    // ── Perfil (provedores vinculados) ────────────────────────────────────────
+
+    "/auth/profile": async (req: Request) => {
+      if (req.method !== "GET")
+        return new Response("Method Not Allowed", { status: 405 });
+      const token = new URL(req.url).searchParams.get("token") ?? "";
+      const sess = await getSession(token);
+      if (!sess) return Response.json({ error: "Não autenticado." }, { status: 401 });
+      const user = await users.findOne({ _id: new ObjectId(sess.userId) }) as UserDoc | null;
+      if (!user) return Response.json({ error: "Usuário não encontrado." }, { status: 404 });
+      return Response.json({
+        email: user.email ?? null,
+        hasPassword: !!user.password,
+        googleLinked: !!user.googleId,
+        githubLinked: !!user.githubId,
+        avatarUrl: user.avatarUrl ?? null,
+      });
+    },
+
+    // ── Avatar upload ─────────────────────────────────────────────────────────
+
+    "/auth/avatar": async (req: Request) => {
+      if (req.method !== "POST")
+        return new Response("Method Not Allowed", { status: 405 });
+      const { token, dataUrl } = (await req.json()) as { token?: string; dataUrl?: string };
+      const sess = await getSession(token ?? "");
+      if (!sess) return Response.json({ error: "Não autenticado." }, { status: 401 });
+      if (!dataUrl || !dataUrl.startsWith("data:image/"))
+        return Response.json({ error: "Formato inválido." }, { status: 400 });
+      if (dataUrl.length > 200_000)
+        return Response.json({ error: "Imagem muito grande (máx ~150kb)." }, { status: 400 });
+      await users.updateOne(
+        { _id: new ObjectId(sess.userId) },
+        { $set: { avatarUrl: dataUrl } },
+      );
+      return Response.json({ ok: true });
+    },
+
+    // ── Alterar senha ─────────────────────────────────────────────────────────
+
+    "/auth/change-password": async (req: Request) => {
+      if (req.method !== "POST")
+        return new Response("Method Not Allowed", { status: 405 });
+      const { token, currentPassword, newPassword } = (await req.json()) as {
+        token?: string; currentPassword?: string; newPassword?: string;
+      };
+      const sess = await getSession(token ?? "");
+      if (!sess) return Response.json({ error: "Não autenticado." }, { status: 401 });
+      if (!newPassword || newPassword.length < 4)
+        return Response.json({ error: "Nova senha muito curta (mín. 4 caracteres)." }, { status: 400 });
+
+      const user = await users.findOne({ _id: new ObjectId(sess.userId) }) as UserDoc | null;
+      if (!user) return Response.json({ error: "Usuário não encontrado." }, { status: 404 });
+
+      // Se tem senha local, exige senha atual
+      if (user.password) {
+        if (!currentPassword)
+          return Response.json({ error: "Informe a senha atual." }, { status: 400 });
+        if (!(await Bun.password.verify(currentPassword, user.password)))
+          return Response.json({ error: "Senha atual incorreta." }, { status: 401 });
+      }
+
+      const hash = await Bun.password.hash(newPassword);
+      await users.updateOne({ _id: user._id }, { $set: { password: hash } });
+      return Response.json({ ok: true });
+    },
+
+    // ── Desvincular provedor OAuth ────────────────────────────────────────────
+
+    "/auth/unlink-provider": async (req: Request) => {
+      if (req.method !== "POST")
+        return new Response("Method Not Allowed", { status: 405 });
+      const { token, provider } = (await req.json()) as { token?: string; provider?: string };
+      const sess = await getSession(token ?? "");
+      if (!sess) return Response.json({ error: "Não autenticado." }, { status: 401 });
+      if (provider !== "google" && provider !== "github")
+        return Response.json({ error: "Provedor inválido." }, { status: 400 });
+
+      const user = await users.findOne({ _id: new ObjectId(sess.userId) }) as UserDoc | null;
+      if (!user) return Response.json({ error: "Usuário não encontrado." }, { status: 404 });
+
+      // Garante que não vai ficar sem forma de login
+      const otherProvider = provider === "google" ? "githubId" : "googleId";
+      if (!user.password && !user[otherProvider])
+        return Response.json({ error: "Vincule outro método de login antes de desvincular." }, { status: 400 });
+
+      const field = provider === "google" ? "googleId" : "githubId";
+      await users.updateOne({ _id: user._id }, { $unset: { [field]: "" } });
       return Response.json({ ok: true });
     },
 
