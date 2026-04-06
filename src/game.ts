@@ -53,7 +53,16 @@ import {
 import { type UserData, saveGameState, logout, buyPremium } from "./auth";
 import { type GameItem, SHOP_ITEMS, itemNextPrice } from "./items";
 import { World, type Entity } from "./ecs/World";
-import { Position as EcsPosition, CowAI, CowTypeComp, BanditAI, BasedTag, LegacyId, NetworkId, RemotePlayerData } from "./components";
+import {
+  Position as EcsPosition,
+  CowAI,
+  CowTypeComp,
+  BanditAI,
+  BasedTag,
+  LegacyId,
+  NetworkId,
+  RemotePlayerData,
+} from "./components";
 import { CowAISystem } from "./systems/CowAISystem";
 import { BanditAISystem } from "./systems/BanditAISystem";
 import { type NPCEntry, NPC_ENTRIES } from "./npcs";
@@ -75,9 +84,12 @@ import {
   renderStarterPackPopup,
   renderBirthdayDialog,
 } from "./ui/BirthdayRenderer";
-import { renderStatsPanel, renderOnlinePanel, renderChat } from "./ui/HUDRenderer";
+import {
+  renderStatsPanel,
+  renderOnlinePanel,
+  renderChat,
+} from "./ui/HUDRenderer";
 import { renderAdminOverlay } from "./ui/AdminRenderer";
-
 
 interface Player {
   col: number;
@@ -327,7 +339,13 @@ export class Game {
     timeLeft: 0,
     flashTimer: 0,
   };
-  private benchCraftBtns: Array<{ id: string; x: number; y: number; w: number; h: number }> = [];
+  private benchCraftBtns: Array<{
+    id: string;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+  }> = [];
   private itemIcons = new Map<string, HTMLImageElement>(); // cache de imagens de itens
   private shopOpen = false;
   private vendorDialog: {
@@ -429,12 +447,19 @@ export class Game {
   private birthdayCloseBtn = { x: 0, y: 0, w: 0, h: 0 };
   private cakeBobbingTimer = 0;
   private birthdayParticles: Array<{
-    x: number; y: number; vx: number; vy: number;
-    color: string; life: number; maxLife: number; size: number;
+    x: number;
+    y: number;
+    vx: number;
+    vy: number;
+    color: string;
+    life: number;
+    maxLife: number;
+    size: number;
   }> = [];
-  private eventPopupDismissed = !!sessionStorage.getItem("cowboy_bday_popup_seen");
+  private eventPopupDismissed = !!sessionStorage.getItem(
+    "cowboy_bday_popup_seen",
+  );
   private eventPopupTimer = 10;
-  private eventPopupCloseBtn = { x: 0, y: 0, w: 0, h: 0 };
 
   // Starter pack one-time popup
   private starterPackDismissed = !!localStorage.getItem("cowboy_starter_v1");
@@ -479,7 +504,9 @@ export class Game {
       this.myColor = userData.color;
       this.myName = userData.username;
       this.isAdmin = userData.isAdmin ?? false;
-      this.birthdaySentParabens = !!localStorage.getItem("cowboy_parabens_2025");
+      this.birthdaySentParabens = !!localStorage.getItem(
+        "cowboy_parabens_2025",
+      );
       // basedCows é a fonte de verdade — não usa basedCount da DB (pode estar desatualizado)
       this.basedCount = userData.basedCows?.length ?? userData.basedCount;
       this.discovered = new Set(userData.discovered);
@@ -579,10 +606,15 @@ export class Game {
           if (entity !== undefined) {
             const pos = this.world.get(entity, EcsPosition);
             const data = this.world.get(entity, RemotePlayerData);
-            if (pos) { pos.col = u.col; pos.row = u.row; }
+            if (pos) {
+              pos.col = u.col;
+              pos.row = u.row;
+            }
             if (data) {
-              data.dirCol = u.dirCol; data.dirRow = u.dirRow;
-              data.moving = u.moving; data.herdCount = u.herdCount;
+              data.dirCol = u.dirCol;
+              data.dirRow = u.dirRow;
+              data.moving = u.moving;
+              data.herdCount = u.herdCount;
             }
           }
         },
@@ -597,8 +629,9 @@ export class Game {
         onCowBased: (batch) => {
           if (batch.id === this.myId) {
             // Aplica posições canônicas do servidor nas vacas locais no curral
-            const localBased = this.basedCows()
-              .sort((a, b) => a.herdIndex - b.herdIndex);
+            const localBased = this.basedCows().sort(
+              (a, b) => a.herdIndex - b.herdIndex,
+            );
             batch.cows.forEach((pos, i) => {
               if (localBased[i]) {
                 localBased[i]!.col = pos.col;
@@ -620,7 +653,10 @@ export class Game {
           const rpEntity = this.remotePlayerEntities.get(msg.id);
           if (rpEntity !== undefined) {
             const data = this.world.get(rpEntity, RemotePlayerData);
-            if (data) { data.lastMessage = msg.text; data.lastMessageTime = Date.now(); }
+            if (data) {
+              data.lastMessage = msg.text;
+              data.lastMessageTime = Date.now();
+            }
           }
         },
         onKicked: () => {
@@ -871,23 +907,25 @@ export class Game {
     if (cmd === "tp" || cmd === "teleport") {
       const col = parseFloat(parts[1] ?? "");
       const row = parseFloat(parts[2] ?? "");
-      if (isNaN(col) || isNaN(row)) { err("Uso: /tp <col> <row>"); return; }
+      if (isNaN(col) || isNaN(row)) {
+        err("Uso: /tp <col> <row>");
+        return;
+      }
       this.player.col = Math.max(0, Math.min(MAP_COLS - 1, col));
       this.player.row = Math.max(0, Math.min(MAP_ROWS - 1, row));
       ok(`Teletransportado para (${col}, ${row})`);
-
     } else if (cmd === "spawn") {
       const entity = this.spawnCowEntity(this.nextCowId++);
       const pos = this.world.must(entity, EcsPosition);
       pos.col = this.player.col + 2;
       pos.row = this.player.row + 2;
       const tc = this.world.must(entity, CowTypeComp);
-      ok(`Vaca spawned: ${tc.cowType.id} em (${pos.col.toFixed(1)}, ${pos.row.toFixed(1)})`);
-
+      ok(
+        `Vaca spawned: ${tc.cowType.id} em (${pos.col.toFixed(1)}, ${pos.row.toFixed(1)})`,
+      );
     } else if (cmd === "godmode" || cmd === "god") {
       this.adminGodMode = !this.adminGodMode;
       ok(`God mode: ${this.adminGodMode ? "ON" : "OFF"}`);
-
     } else if (cmd === "time") {
       const period = (parts[1] ?? "").toLowerCase();
       if (period === "day" || period === "dia" || period === "manha") {
@@ -905,13 +943,14 @@ export class Game {
       } else {
         err("Uso: /time <manha|tarde|noite|real>");
       }
-
     } else if (cmd === "setcoins") {
       const amount = parseInt(parts[1] ?? "");
-      if (isNaN(amount) || amount < 0) { err("Uso: /setcoins <amount>"); return; }
+      if (isNaN(amount) || amount < 0) {
+        err("Uso: /setcoins <amount>");
+        return;
+      }
       this.coins = amount;
       ok(`Coins definido: ${amount}`);
-
     } else if (cmd === "give") {
       const maybeNum = parseInt(parts[1] ?? "");
       if (!isNaN(maybeNum)) {
@@ -920,74 +959,135 @@ export class Game {
       } else {
         const username = parts[1] ?? "";
         const amount = parseInt(parts[2] ?? "");
-        if (!username || isNaN(amount)) { err("Uso: /give <amount> ou /give <username> <amount>"); return; }
+        if (!username || isNaN(amount)) {
+          err("Uso: /give <amount> ou /give <username> <amount>");
+          return;
+        }
         fetch("/admin/cmd", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ token: this.myToken, command: "give_coins", username, amount }),
-        }).then((r) => r.json()).then((d: { ok?: boolean; error?: string }) => {
-          if (d.ok) { this.adminCmdResult = `✅ +${amount} coins → ${username}`; this.adminCmdResultTimer = 3; }
-          else { this.adminCmdResult = `❌ ${d.error ?? "Erro"}`; this.adminCmdResultTimer = 3; }
-        }).catch(() => { this.adminCmdResult = "❌ Erro de conexão"; this.adminCmdResultTimer = 3; });
+          body: JSON.stringify({
+            token: this.myToken,
+            command: "give_coins",
+            username,
+            amount,
+          }),
+        })
+          .then((r) => r.json())
+          .then((d: { ok?: boolean; error?: string }) => {
+            if (d.ok) {
+              this.adminCmdResult = `✅ +${amount} coins → ${username}`;
+              this.adminCmdResultTimer = 3;
+            } else {
+              this.adminCmdResult = `❌ ${d.error ?? "Erro"}`;
+              this.adminCmdResultTimer = 3;
+            }
+          })
+          .catch(() => {
+            this.adminCmdResult = "❌ Erro de conexão";
+            this.adminCmdResultTimer = 3;
+          });
         ok(`Enviando ${amount} coins para ${username}...`);
       }
-
     } else if (cmd === "kick") {
       const username = parts.slice(1).join(" ");
-      if (!username) { err("Uso: /kick <username>"); return; }
+      if (!username) {
+        err("Uso: /kick <username>");
+        return;
+      }
       fetch("/admin/cmd", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token: this.myToken, command: "kick", username }),
-      }).then((r) => r.json()).then((d: { ok?: boolean; error?: string }) => {
-        if (d.ok) { this.adminCmdResult = `✅ ${username} kickado`; this.adminCmdResultTimer = 3; }
-        else { this.adminCmdResult = `❌ ${d.error ?? "Erro"}`; this.adminCmdResultTimer = 3; }
-      }).catch(() => { this.adminCmdResult = "❌ Erro de conexão"; this.adminCmdResultTimer = 3; });
+        body: JSON.stringify({
+          token: this.myToken,
+          command: "kick",
+          username,
+        }),
+      })
+        .then((r) => r.json())
+        .then((d: { ok?: boolean; error?: string }) => {
+          if (d.ok) {
+            this.adminCmdResult = `✅ ${username} kickado`;
+            this.adminCmdResultTimer = 3;
+          } else {
+            this.adminCmdResult = `❌ ${d.error ?? "Erro"}`;
+            this.adminCmdResultTimer = 3;
+          }
+        })
+        .catch(() => {
+          this.adminCmdResult = "❌ Erro de conexão";
+          this.adminCmdResultTimer = 3;
+        });
       ok(`Kickando ${username}...`);
-
     } else if (cmd === "broadcast" || cmd === "bc") {
       const text = parts.slice(1).join(" ");
-      if (!text) { err("Uso: /broadcast <mensagem>"); return; }
+      if (!text) {
+        err("Uso: /broadcast <mensagem>");
+        return;
+      }
       fetch("/admin/cmd", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token: this.myToken, command: "broadcast", text }),
-      }).then((r) => r.json()).then((d: { ok?: boolean; error?: string }) => {
-        if (d.ok) { this.adminCmdResult = "✅ Broadcast enviado"; this.adminCmdResultTimer = 3; }
-        else { this.adminCmdResult = `❌ ${d.error ?? "Erro"}`; this.adminCmdResultTimer = 3; }
-      }).catch(() => { this.adminCmdResult = "❌ Erro de conexão"; this.adminCmdResultTimer = 3; });
+        body: JSON.stringify({
+          token: this.myToken,
+          command: "broadcast",
+          text,
+        }),
+      })
+        .then((r) => r.json())
+        .then((d: { ok?: boolean; error?: string }) => {
+          if (d.ok) {
+            this.adminCmdResult = "✅ Broadcast enviado";
+            this.adminCmdResultTimer = 3;
+          } else {
+            this.adminCmdResult = `❌ ${d.error ?? "Erro"}`;
+            this.adminCmdResultTimer = 3;
+          }
+        })
+        .catch(() => {
+          this.adminCmdResult = "❌ Erro de conexão";
+          this.adminCmdResultTimer = 3;
+        });
       ok("Enviando broadcast...");
-
     } else if (cmd === "players") {
-      const names = this.world.query(RemotePlayerData).map(([, d]) => d.name).join(", ");
+      const names = this.world
+        .query(RemotePlayerData)
+        .map(([, d]) => d.name)
+        .join(", ");
       ok(`Online: ${names || "nenhum outro jogador"}`);
-
     } else if (cmd === "clearbase") {
-      const based = this.world.query(EcsPosition, CowAI)
-        .filter(([,, ai]) => ai.state === "based");
+      const based = this.world
+        .query(EcsPosition, CowAI)
+        .filter(([, , ai]) => ai.state === "based");
       for (const [e] of based) this.world.destroy(e);
       this.basedCount = 0;
       ok(`Base limpa: ${based.length} vacas removidas`);
-
     } else if (cmd === "pos") {
-      ok(`Posição: col=${this.player.col.toFixed(2)}, row=${this.player.row.toFixed(2)}`);
-
+      ok(
+        `Posição: col=${this.player.col.toFixed(2)}, row=${this.player.row.toFixed(2)}`,
+      );
     } else if (cmd === "help") {
-      ok("/tp /spawn /godmode /time /setcoins /give /kick /broadcast /players /clearbase /pos /event");
-
+      ok(
+        "/tp /spawn /godmode /time /setcoins /give /kick /broadcast /players /clearbase /pos /event",
+      );
     } else if (cmd === "event") {
       const sub = (parts[1] ?? "").toLowerCase();
       if (sub === "list") {
         ok(`Eventos ativos: ${this.isBirthdayActive ? "birthday" : "nenhum"}`);
       } else if (sub === "birthday") {
         const state = (parts[2] ?? "").toLowerCase();
-        if (state === "on") { this.birthdayForceState = "on"; ok("Evento birthday: ON"); }
-        else if (state === "off") { this.birthdayForceState = "off"; ok("Evento birthday: OFF"); }
-        else { err("Uso: /event birthday on|off"); }
+        if (state === "on") {
+          this.birthdayForceState = "on";
+          ok("Evento birthday: ON");
+        } else if (state === "off") {
+          this.birthdayForceState = "off";
+          ok("Evento birthday: OFF");
+        } else {
+          err("Uso: /event birthday on|off");
+        }
       } else {
         err("Uso: /event list | /event birthday on|off");
       }
-
     } else {
       err(`Desconhecido: /${cmd} — use /help`);
     }
@@ -999,7 +1099,8 @@ export class Game {
     if (this.birthdaySentParabens) return;
     this.birthdaySentParabens = true;
     localStorage.setItem("cowboy_parabens_2025", "1");
-    const randomMsg = PARABENS_MESSAGES[Math.floor(Math.random() * PARABENS_MESSAGES.length)]!;
+    const randomMsg =
+      PARABENS_MESSAGES[Math.floor(Math.random() * PARABENS_MESSAGES.length)]!;
     const fullMsg = `🎂 ${this.myName} deseja: Feliz Aniversário ao criador! ${randomMsg}`;
     this.network?.sendChat(fullMsg);
     this.network?.sendBirthdayParabens();
@@ -1008,8 +1109,18 @@ export class Game {
   }
 
   private spawnBirthdayConfetti() {
-    const W = this.canvas.width, H = this.canvas.height;
-    const colors = ["#FF6B6B","#FFD700","#6BCB77","#4D96FF","#FF6BD6","#FFA07A","#C77DFF","#00F5D4"];
+    const W = this.canvas.width,
+      H = this.canvas.height;
+    const colors = [
+      "#FF6B6B",
+      "#FFD700",
+      "#6BCB77",
+      "#4D96FF",
+      "#FF6BD6",
+      "#FFA07A",
+      "#C77DFF",
+      "#00F5D4",
+    ];
     for (let i = 0; i < 80; i++) {
       const angle = Math.random() * Math.PI * 2;
       const speed = 3 + Math.random() * 6;
@@ -1044,13 +1155,21 @@ export class Game {
   }
 
   private renderEventPopup(W: number, H: number) {
-    if (this.isPreview || this.eventPopupDismissed || !this.isBirthdayActive) return;
-    renderEventPopup({ ctx: this.ctx, canvas: { width: W, height: H }, eventPopupTimer: this.eventPopupTimer });
+    if (this.isPreview || this.eventPopupDismissed || !this.isBirthdayActive)
+      return;
+    renderEventPopup({
+      ctx: this.ctx,
+      canvas: { width: W, height: H },
+      eventPopupTimer: this.eventPopupTimer,
+    });
   }
 
   private renderStarterPackPopup(W: number, H: number) {
     if (this.isPreview || this.starterPackDismissed) return;
-    const btns = renderStarterPackPopup({ ctx: this.ctx, canvas: { width: W, height: H } });
+    const btns = renderStarterPackPopup({
+      ctx: this.ctx,
+      canvas: { width: W, height: H },
+    });
     this.starterPackBuyBtn = btns.buyBtn;
     this.starterPackCloseBtn = btns.closeBtn;
   }
@@ -1066,7 +1185,7 @@ export class Game {
     this.birthdayCloseBtn = btns.closeBtn;
   }
 
-private preloadPlayerSprites() {
+  private preloadPlayerSprites() {
     const dirs = [
       "north",
       "north-east",
@@ -1264,18 +1383,29 @@ private preloadPlayerSprites() {
       return;
     }
 
-
     // Starter pack popup
     if (!this.starterPackDismissed) {
       const bb = this.starterPackBuyBtn;
-      if (bb.w > 0 && x >= bb.x && x <= bb.x + bb.w && y >= bb.y && y <= bb.y + bb.h) {
+      if (
+        bb.w > 0 &&
+        x >= bb.x &&
+        x <= bb.x + bb.w &&
+        y >= bb.y &&
+        y <= bb.y + bb.h
+      ) {
         this.starterPackDismissed = true;
         localStorage.setItem("cowboy_starter_v1", "1");
         void buyPremium(this.myToken);
         return;
       }
       const scb = this.starterPackCloseBtn;
-      if (scb.w > 0 && x >= scb.x && x <= scb.x + scb.w && y >= scb.y && y <= scb.y + scb.h) {
+      if (
+        scb.w > 0 &&
+        x >= scb.x &&
+        x <= scb.x + scb.w &&
+        y >= scb.y &&
+        y <= scb.y + scb.h
+      ) {
         this.starterPackDismissed = true;
         localStorage.setItem("cowboy_starter_v1", "1");
         return;
@@ -1293,12 +1423,24 @@ private preloadPlayerSprites() {
     // Birthday dialog buttons
     if (this.birthdayDialogOpen) {
       const cb = this.birthdayCloseBtn;
-      if (cb.w > 0 && x >= cb.x && x <= cb.x + cb.w && y >= cb.y && y <= cb.y + cb.h) {
+      if (
+        cb.w > 0 &&
+        x >= cb.x &&
+        x <= cb.x + cb.w &&
+        y >= cb.y &&
+        y <= cb.y + cb.h
+      ) {
         this.birthdayDialogOpen = false;
         return;
       }
       const conf = this.birthdayConfirmBtn;
-      if (conf.w > 0 && x >= conf.x && x <= conf.x + conf.w && y >= conf.y && y <= conf.y + conf.h) {
+      if (
+        conf.w > 0 &&
+        x >= conf.x &&
+        x <= conf.x + conf.w &&
+        y >= conf.y &&
+        y <= conf.y + conf.h
+      ) {
         this.sendParabens();
         return;
       }
@@ -1524,7 +1666,12 @@ private preloadPlayerSprites() {
       }
       // Craft buttons
       for (const btn of this.benchCraftBtns) {
-        if (x >= btn.x && x <= btn.x + btn.w && y >= btn.y && y <= btn.y + btn.h) {
+        if (
+          x >= btn.x &&
+          x <= btn.x + btn.w &&
+          y >= btn.y &&
+          y <= btn.y + btn.h
+        ) {
           if (btn.id === "machado") this.craftMachado();
           return;
         }
@@ -1753,7 +1900,8 @@ private preloadPlayerSprites() {
       const s = this.isoToScreen(pos.col, pos.row);
       if (
         Math.hypot(x - s.x, y - (s.y - 12)) < 34 &&
-        Math.hypot(pos.col - this.player.col, pos.row - this.player.row) <= this.effectiveCaptureRange
+        Math.hypot(pos.col - this.player.col, pos.row - this.player.row) <=
+          this.effectiveCaptureRange
       ) {
         if (this.herdCows().length >= this.effectiveHerdCapacity) return;
         this.startLasso(entity);
@@ -1852,9 +2000,12 @@ private preloadPlayerSprites() {
     }
     if (this.lasso.active) return;
     // Scare bandit if close — drops cow and flees
-    const nearBanditEntry = this.world.query(EcsPosition, BanditAI).find(
-      ([, pos, ai]) => ai.state === "fleeing" && dist(this.player, pos) <= 3.5,
-    );
+    const nearBanditEntry = this.world
+      .query(EcsPosition, BanditAI)
+      .find(
+        ([, pos, ai]) =>
+          ai.state === "fleeing" && dist(this.player, pos) <= 3.5,
+      );
     if (nearBanditEntry) {
       const [, , ai] = nearBanditEntry;
       if (ai.targetCowEntity !== null) {
@@ -2082,8 +2233,15 @@ private preloadPlayerSprites() {
     const nowNight = this.isNight;
     if (this.prevIsNight && !nowNight) {
       // Dawn: despawn wandering/fleeing nightOnly cows
-      for (const [entity, , ai, tc] of this.world.query(EcsPosition, CowAI, CowTypeComp)) {
-        if (tc.cowType.nightOnly && (ai.state === "wandering" || ai.state === "fleeing")) {
+      for (const [entity, , ai, tc] of this.world.query(
+        EcsPosition,
+        CowAI,
+        CowTypeComp,
+      )) {
+        if (
+          tc.cowType.nightOnly &&
+          (ai.state === "wandering" || ai.state === "fleeing")
+        ) {
           this.world.destroy(entity);
         }
       }
@@ -2100,13 +2258,15 @@ private preloadPlayerSprites() {
     // Respawn de vacas a cada 45-75s, sem ultrapassar COW_COUNT ativas
     this.cowSpawnTimer -= dt;
     if (this.cowSpawnTimer <= 0) {
-      const active = this.world.query(CowAI)
-        .filter(([, ai]) =>
-          ai.state === "wandering" ||
-          ai.state === "fleeing" ||
-          ai.state === "herd",
+      const active = this.world
+        .query(CowAI)
+        .filter(
+          ([, ai]) =>
+            ai.state === "wandering" ||
+            ai.state === "fleeing" ||
+            ai.state === "herd",
         ).length;
-      if (active < COW_COUNT) { 
+      if (active < COW_COUNT) {
         this.spawnCowEntity(this.nextCowId++);
       }
       this.cowSpawnTimer = 45 + Math.random() * 30;
@@ -2163,8 +2323,7 @@ private preloadPlayerSprites() {
     const discovered = [...this.discovered];
     const discoveredNPCs = [...this.discoveredNPCs];
     const capturedByType = Object.fromEntries(this.capturedByType);
-    const basedCowTypes = this.basedCows()
-      .map((c) => c.type.id);
+    const basedCowTypes = this.basedCows().map((c) => c.type.id);
     const inventory = Object.fromEntries(this.inventory);
     await saveGameState(
       this.myToken,
@@ -2293,7 +2452,9 @@ private preloadPlayerSprites() {
     this.updateHerd(dt);
   }
 
-  private updateHerd(_dt: number) { /* now handled by CowAISystem */ }
+  private updateHerd(_dt: number) {
+    /* now handled by CowAISystem */
+  }
 
   private updateCows(dt: number) {
     this.cowAISystem.update(this.world, dt, {
@@ -2327,7 +2488,8 @@ private preloadPlayerSprites() {
     }
     if (l.phase === "pulling") {
       l.timeLeft -= dt;
-      const clicksNeeded = this.world.must(l.cowEntity, CowTypeComp).cowType.clicksNeeded;
+      const clicksNeeded = this.world.must(l.cowEntity, CowTypeComp).cowType
+        .clicksNeeded;
       if (l.clickCount >= this.effectiveLassoClicks(clicksNeeded)) {
         this.captureCow(l.cowEntity);
         l.active = false;
@@ -2470,11 +2632,15 @@ private preloadPlayerSprites() {
     const now = new Date();
     const m = now.getMonth() + 1;
     const d = now.getDate();
-    return m === BIRTHDAY_MONTH && d >= BIRTHDAY_DAY_START && d <= BIRTHDAY_DAY_END;
+    return (
+      m === BIRTHDAY_MONTH && d >= BIRTHDAY_DAY_START && d <= BIRTHDAY_DAY_END
+    );
   }
 
   private isAtCake(): boolean {
-    return dist(this.player, { col: CAKE_COL, row: CAKE_ROW }) <= CAKE_INTERACT_DIST;
+    return (
+      dist(this.player, { col: CAKE_COL, row: CAKE_ROW }) <= CAKE_INTERACT_DIST
+    );
   }
 
   private get effectiveHerdCapacity() {
@@ -2573,15 +2739,17 @@ private preloadPlayerSprites() {
   }
 
   private herdCows(): (Cow & { _entity: Entity })[] {
-    return this.world.query(EcsPosition, CowAI)
-      .filter(([,, ai]) => ai.state === "herd")
+    return this.world
+      .query(EcsPosition, CowAI)
+      .filter(([, , ai]) => ai.state === "herd")
       .sort((a, b) => a[2].herdIndex - b[2].herdIndex)
       .map(([e]) => this.cowCompat(e));
   }
 
   private basedCows(): (Cow & { _entity: Entity })[] {
-    return this.world.query(EcsPosition, CowAI)
-      .filter(([,, ai]) => ai.state === "based")
+    return this.world
+      .query(EcsPosition, CowAI)
+      .filter(([, , ai]) => ai.state === "based")
       .map(([e]) => this.cowCompat(e));
   }
 
@@ -2593,9 +2761,12 @@ private preloadPlayerSprites() {
 
     const entity = this.world.create();
     const data = new RemotePlayerData();
-    data.dirCol = p.dirCol; data.dirRow = p.dirRow;
-    data.moving = p.moving; data.color = p.color;
-    data.name = p.name; data.herdCount = p.herdCount;
+    data.dirCol = p.dirCol;
+    data.dirRow = p.dirRow;
+    data.moving = p.moving;
+    data.color = p.color;
+    data.name = p.name;
+    data.herdCount = p.herdCount;
     data.lastMessage = p.lastMessage;
     data.lastMessageTime = p.lastMessageTime;
 
@@ -2625,7 +2796,12 @@ private preloadPlayerSprites() {
   }
 
   // Creates a based cow entity from direct position (for restoring saved cows)
-  private addBasedCowEntity(id: number, col: number, row: number, typeId: string): Entity {
+  private addBasedCowEntity(
+    id: number,
+    col: number,
+    row: number,
+    typeId: string,
+  ): Entity {
     const cowType = COW_TYPES.find((t) => t.id === typeId) ?? COW_TYPES[0]!;
     const entity = this.world.create();
     const ai = new CowAI();
@@ -2648,22 +2824,44 @@ private preloadPlayerSprites() {
     const cowCompatFn = this.cowCompat.bind(this);
     return {
       id: entity,
-      get col() { return pos.col; },
-      set col(v: number) { pos.col = v; },
-      get row() { return pos.row; },
-      set row(v: number) { pos.row = v; },
-      get fleeCol() { return ai.fleeCol; },
-      set fleeCol(v: number) { ai.fleeCol = v; },
-      get fleeRow() { return ai.fleeRow; },
-      set fleeRow(v: number) { ai.fleeRow = v; },
-      get state() { return ai.state as Bandit["state"]; },
-      set state(v: Bandit["state"]) { ai.state = v; },
+      get col() {
+        return pos.col;
+      },
+      set col(v: number) {
+        pos.col = v;
+      },
+      get row() {
+        return pos.row;
+      },
+      set row(v: number) {
+        pos.row = v;
+      },
+      get fleeCol() {
+        return ai.fleeCol;
+      },
+      set fleeCol(v: number) {
+        ai.fleeCol = v;
+      },
+      get fleeRow() {
+        return ai.fleeRow;
+      },
+      set fleeRow(v: number) {
+        ai.fleeRow = v;
+      },
+      get state() {
+        return ai.state as Bandit["state"];
+      },
+      set state(v: Bandit["state"]) {
+        ai.state = v;
+      },
       get targetCow() {
-        if (ai.targetCowEntity === null || !world.isAlive(ai.targetCowEntity)) return null;
+        if (ai.targetCowEntity === null || !world.isAlive(ai.targetCowEntity))
+          return null;
         return cowCompatFn(ai.targetCowEntity);
       },
       set targetCow(v: Cow | null) {
-        ai.targetCowEntity = (v as (Cow & { _entity?: Entity }) | null)?._entity ?? null;
+        ai.targetCowEntity =
+          (v as (Cow & { _entity?: Entity }) | null)?._entity ?? null;
       },
       _entity: entity,
     };
@@ -2677,53 +2875,129 @@ private preloadPlayerSprites() {
     const lid = this.world.must(entity, LegacyId);
     return {
       id: lid.id,
-      get col() { return pos.col; },
-      set col(v: number) { pos.col = v; },
-      get row() { return pos.row; },
-      set row(v: number) { pos.row = v; },
-      get state() { return ai.state as CowState; },
-      set state(v: CowState) { ai.state = v as never; },
-      get type() { return tc.cowType; },
-      get wanderTimer() { return ai.wanderTimer; },
-      set wanderTimer(v: number) { ai.wanderTimer = v; },
-      get wanderDirCol() { return ai.wanderDirCol; },
-      set wanderDirCol(v: number) { ai.wanderDirCol = v; },
-      get wanderDirRow() { return ai.wanderDirRow; },
-      set wanderDirRow(v: number) { ai.wanderDirRow = v; },
-      get herdIndex() { return ai.herdIndex; },
-      set herdIndex(v: number) { ai.herdIndex = v; },
-      get sparkTimer() { return ai.sparkTimer; },
-      set sparkTimer(v: number) { ai.sparkTimer = v; },
+      get col() {
+        return pos.col;
+      },
+      set col(v: number) {
+        pos.col = v;
+      },
+      get row() {
+        return pos.row;
+      },
+      set row(v: number) {
+        pos.row = v;
+      },
+      get state() {
+        return ai.state as CowState;
+      },
+      set state(v: CowState) {
+        ai.state = v as never;
+      },
+      get type() {
+        return tc.cowType;
+      },
+      get wanderTimer() {
+        return ai.wanderTimer;
+      },
+      set wanderTimer(v: number) {
+        ai.wanderTimer = v;
+      },
+      get wanderDirCol() {
+        return ai.wanderDirCol;
+      },
+      set wanderDirCol(v: number) {
+        ai.wanderDirCol = v;
+      },
+      get wanderDirRow() {
+        return ai.wanderDirRow;
+      },
+      set wanderDirRow(v: number) {
+        ai.wanderDirRow = v;
+      },
+      get herdIndex() {
+        return ai.herdIndex;
+      },
+      set herdIndex(v: number) {
+        ai.herdIndex = v;
+      },
+      get sparkTimer() {
+        return ai.sparkTimer;
+      },
+      set sparkTimer(v: number) {
+        ai.sparkTimer = v;
+      },
       _entity: entity,
     };
   }
 
-  private remotePlayerCompat(entity: Entity): RemotePlayer & { _entity: Entity } {
+  private remotePlayerCompat(
+    entity: Entity,
+  ): RemotePlayer & { _entity: Entity } {
     const pos = this.world.must(entity, EcsPosition);
     const data = this.world.must(entity, RemotePlayerData);
     const nid = this.world.must(entity, NetworkId);
     return {
       id: nid.id,
-      get col() { return pos.col; },
-      set col(v: number) { pos.col = v; },
-      get row() { return pos.row; },
-      set row(v: number) { pos.row = v; },
-      get dirCol() { return data.dirCol; },
-      set dirCol(v: number) { data.dirCol = v; },
-      get dirRow() { return data.dirRow; },
-      set dirRow(v: number) { data.dirRow = v; },
-      get moving() { return data.moving; },
-      set moving(v: boolean) { data.moving = v; },
-      get color() { return data.color; },
-      set color(v: string) { data.color = v; },
-      get name() { return data.name; },
-      set name(v: string) { data.name = v; },
-      get herdCount() { return data.herdCount; },
-      set herdCount(v: number) { data.herdCount = v; },
-      get lastMessage() { return data.lastMessage; },
-      set lastMessage(v: string | undefined) { data.lastMessage = v; },
-      get lastMessageTime() { return data.lastMessageTime; },
-      set lastMessageTime(v: number | undefined) { data.lastMessageTime = v; },
+      get col() {
+        return pos.col;
+      },
+      set col(v: number) {
+        pos.col = v;
+      },
+      get row() {
+        return pos.row;
+      },
+      set row(v: number) {
+        pos.row = v;
+      },
+      get dirCol() {
+        return data.dirCol;
+      },
+      set dirCol(v: number) {
+        data.dirCol = v;
+      },
+      get dirRow() {
+        return data.dirRow;
+      },
+      set dirRow(v: number) {
+        data.dirRow = v;
+      },
+      get moving() {
+        return data.moving;
+      },
+      set moving(v: boolean) {
+        data.moving = v;
+      },
+      get color() {
+        return data.color;
+      },
+      set color(v: string) {
+        data.color = v;
+      },
+      get name() {
+        return data.name;
+      },
+      set name(v: string) {
+        data.name = v;
+      },
+      get herdCount() {
+        return data.herdCount;
+      },
+      set herdCount(v: number) {
+        data.herdCount = v;
+      },
+      get lastMessage() {
+        return data.lastMessage;
+      },
+      set lastMessage(v: string | undefined) {
+        data.lastMessage = v;
+      },
+      get lastMessageTime() {
+        return data.lastMessageTime;
+      },
+      set lastMessageTime(v: number | undefined) {
+        data.lastMessageTime = v;
+      },
       _entity: entity,
     };
   }
@@ -2929,14 +3203,16 @@ private preloadPlayerSprites() {
   /** Tenta adicionar um recurso ao inventário respeitando o limite de slots e stack */
   private addResource(id: string, amount: number, maxStack: number): number {
     const current = this.inventory.get(id) ?? 0;
-    if (current === 0 && this.inventorySlotCount() >= MAX_INVENTORY_SLOTS) return 0; // sem slot livre
+    if (current === 0 && this.inventorySlotCount() >= MAX_INVENTORY_SLOTS)
+      return 0; // sem slot livre
     const gained = Math.min(amount, maxStack - current);
     if (gained > 0) this.inventory.set(id, current + gained);
     return gained;
   }
 
   private nearestBoulder(): { col: number; row: number } | null {
-    const pc = this.player.col, pr = this.player.row;
+    const pc = this.player.col,
+      pr = this.player.row;
     const r = Math.ceil(STONE_HARVEST_DIST) + 1;
     let best: { col: number; row: number } | null = null;
     let bestDist = Infinity;
@@ -2957,13 +3233,22 @@ private preloadPlayerSprites() {
   }
 
   private harvestStone(_col: number, _row: number) {
-    const drop = STONE_DROP_MIN + Math.floor(Math.random() * (STONE_DROP_MAX - STONE_DROP_MIN + 1));
+    const drop =
+      STONE_DROP_MIN +
+      Math.floor(Math.random() * (STONE_DROP_MAX - STONE_DROP_MIN + 1));
     this.addResource("stone", drop, STONE_MAX_STACK);
     this.chopFlash = 0.2;
   }
 
   private startChop(col: number, row: number) {
-    this.chop = { active: true, col, row, clickCount: 0, timeLeft: CHOP_TIME_LIMIT, flashTimer: 0 };
+    this.chop = {
+      active: true,
+      col,
+      row,
+      clickCount: 0,
+      timeLeft: CHOP_TIME_LIMIT,
+      flashTimer: 0,
+    };
   }
 
   private updateChop(dt: number) {
@@ -2972,7 +3257,9 @@ private preloadPlayerSprites() {
     if (this.chop.flashTimer > 0) this.chop.flashTimer -= dt;
     if (this.chop.clickCount >= CHOP_CLICKS_NEEDED) {
       // Sucesso
-      const drop = WOOD_DROP_MIN + Math.floor(Math.random() * (WOOD_DROP_MAX - WOOD_DROP_MIN + 1));
+      const drop =
+        WOOD_DROP_MIN +
+        Math.floor(Math.random() * (WOOD_DROP_MAX - WOOD_DROP_MIN + 1));
       this.addResource("wood", drop, WOOD_MAX_STACK);
       const { col, row } = this.chop;
       this.map[row]![col]!.decoration = "none";
@@ -2993,9 +3280,11 @@ private preloadPlayerSprites() {
   private craftMachado() {
     const stone = this.inventory.get("stone") ?? 0;
     if (stone < 5 || this.coins < 50) return;
-    if (!this.hasMachado() && this.inventorySlotCount() >= MAX_INVENTORY_SLOTS) return;
+    if (!this.hasMachado() && this.inventorySlotCount() >= MAX_INVENTORY_SLOTS)
+      return;
     this.inventory.set("stone", stone - 5);
-    if ((this.inventory.get("stone") ?? 0) === 0) this.inventory.delete("stone");
+    if ((this.inventory.get("stone") ?? 0) === 0)
+      this.inventory.delete("stone");
     this.coins -= 50;
     this.inventory.set("machado", 1);
   }
@@ -3080,7 +3369,8 @@ private preloadPlayerSprites() {
     // UI de corte (minigame)
     if (this.chop.active) {
       const { ctx, canvas: cv } = this;
-      const W = cv.width, H = cv.height;
+      const W = cv.width,
+        H = cv.height;
       const progress = this.chop.clickCount / CHOP_CLICKS_NEEDED;
       const barW = Math.min(W - 80, 280);
       const bx = W / 2 - barW / 2;
@@ -3096,11 +3386,16 @@ private preloadPlayerSprites() {
       ctx.fillStyle = "#FFE0A0";
       ctx.textAlign = "center";
       ctx.drawImage(this.icons.axeIcon, W / 2 - 80, by - 26, 18, 18);
-      ctx.fillText(`Cortando... ${this.chop.clickCount}/${CHOP_CLICKS_NEEDED}`, W / 2 + 2, by - 8);
+      ctx.fillText(
+        `Cortando... ${this.chop.clickCount}/${CHOP_CLICKS_NEEDED}`,
+        W / 2 + 2,
+        by - 8,
+      );
       // barra
       ctx.fillStyle = "#2a1a08";
       ctx.fillRect(bx, by, barW, 18);
-      const fillColor = progress > 0.7 ? "#4caf50" : progress > 0.4 ? "#ff9800" : "#f44336";
+      const fillColor =
+        progress > 0.7 ? "#4caf50" : progress > 0.4 ? "#ff9800" : "#f44336";
       ctx.fillStyle = fillColor;
       ctx.fillRect(bx, by, barW * progress, 18);
       ctx.strokeStyle = "#7a5c32";
@@ -3125,7 +3420,6 @@ private preloadPlayerSprites() {
   }
 
   // ─── Tile drawing ─────────────────────────────────────────────────────────
-
 
   // ─── Panel — draws a clean pixel-art wood frame (canvas-only, no sprites) ──
   // Style variants: 0=warm brown, 1=darker brown, 2=grey-green, 3=olive
@@ -3273,7 +3567,11 @@ private preloadPlayerSprites() {
     }
 
     // Jogadores remotos + rebanho deles (depth sorted separadamente)
-    for (const [entity] of this.world.query(EcsPosition, RemotePlayerData, NetworkId)) {
+    for (const [entity] of this.world.query(
+      EcsPosition,
+      RemotePlayerData,
+      NetworkId,
+    )) {
       const r = this.remotePlayerCompat(entity);
       // Vacas seguindo o jogador remoto — cada uma entra no sort individualmente
       const hN = Math.min(r.herdCount ?? 0, 12);
@@ -3340,14 +3638,17 @@ private preloadPlayerSprites() {
 
   /** Map dirCol/dirRow to the sprite direction name */
   private getSpriteDir(dc: number, dr: number): string {
-    if (dc === 1 && dr === -1) return "north-east";
-    if (dc === 1 && dr === 0) return "east";
-    if (dc === 1 && dr === 1) return "south-east";
-    if (dc === 0 && dr === 1) return "south";
-    if (dc === -1 && dr === 1) return "south-west";
-    if (dc === -1 && dr === 0) return "west";
-    if (dc === -1 && dr === -1) return "north-west";
-    return "north";
+    // dc > 0 = east, dc < 0 = west
+    // dr > 0 = south, dr < 0 = north
+    if (dc > 0 && dr < 0) return "north-east";
+    if (dc > 0 && dr === 0) return "east";
+    if (dc > 0 && dr > 0) return "south-east";
+    if (dc === 0 && dr > 0) return "south";
+    if (dc < 0 && dr > 0) return "south-west";
+    if (dc < 0 && dr === 0) return "west";
+    if (dc < 0 && dr < 0) return "north-west";
+    if (dc === 0 && dr < 0) return "north";
+    return "north"; // fallback
   }
 
   // ─── Bench drawing ────────────────────────────────────────────────────────
@@ -3663,7 +3964,12 @@ private preloadPlayerSprites() {
   // ─── Lasso ────────────────────────────────────────────────────────────────
 
   private renderLasso() {
-    if (!this.lasso.active || this.lasso.cowEntity === null || !this.world.isAlive(this.lasso.cowEntity)) return;
+    if (
+      !this.lasso.active ||
+      this.lasso.cowEntity === null ||
+      !this.world.isAlive(this.lasso.cowEntity)
+    )
+      return;
     const { ctx, lasso: l } = this;
     const cowPos = this.world.must(l.cowEntity!, EcsPosition);
     const ps = this.isoToScreen(this.player.col, this.player.row);
@@ -3799,7 +4105,13 @@ private preloadPlayerSprites() {
   // ─── Time-of-day overlay ──────────────────────────────────────────────────
 
   private renderNightOverlay() {
-    renderNightOverlay(this.ctx, this.canvas, this.timePeriod, this.nightFade, this.time);
+    renderNightOverlay(
+      this.ctx,
+      this.canvas,
+      this.timePeriod,
+      this.nightFade,
+      this.time,
+    );
   }
 
   private renderUI() {
@@ -3886,14 +4198,19 @@ private preloadPlayerSprites() {
       myName: this.myName,
       herdCount: this.herdCows().length,
       basedCount: this.basedCount,
-      wanderingCount: this.world.query(CowAI).filter(([, ai]) => ai.state === "wandering" || ai.state === "fleeing").length,
+      wanderingCount: this.world
+        .query(CowAI)
+        .filter(([, ai]) => ai.state === "wandering" || ai.state === "fleeing")
+        .length,
       timePeriod: this.timePeriod,
       nightFade: this.nightFade,
       coins: this.coins,
       moneyIcon: this.icons.moneyIcon,
       leiteTimer: this.leiteTimer,
       time: this.time,
-      hasOwnedItems: SHOP_ITEMS.some((it) => (this.inventory.get(it.id) ?? 0) > 0),
+      hasOwnedItems: SHOP_ITEMS.some(
+        (it) => (this.inventory.get(it.id) ?? 0) > 0,
+      ),
     });
   }
 
@@ -3908,7 +4225,11 @@ private preloadPlayerSprites() {
         isMe: false,
       })),
     ];
-    renderOnlinePanel({ ctx: this.ctx, statsMinimized: this.statsMinimized, players });
+    renderOnlinePanel({
+      ctx: this.ctx,
+      statsMinimized: this.statsMinimized,
+      players,
+    });
   }
 
   // ── Chat (bottom-left) ────────────────────────────────────────────────────
@@ -3993,7 +4314,8 @@ private preloadPlayerSprites() {
       tradeCancelBtn: { x: 0, y: 0, w: 0, h: 0 },
       tradePlayerBtns: [],
     };
-    const onlinePlayers = this.world.query(EcsPosition, RemotePlayerData, NetworkId)
+    const onlinePlayers = this.world
+      .query(EcsPosition, RemotePlayerData, NetworkId)
       .map(([entity]) => this.remotePlayerCompat(entity));
     this.inventoryRenderer.render({
       ctx: this.ctx,
@@ -4017,10 +4339,14 @@ private preloadPlayerSprites() {
     this.inventoryCloseBtn = out.inventoryCloseBtn;
     this.inventoryContentArea = out.inventoryContentArea;
     this.inventoryScroll = out.inventoryScroll;
-    this.inventoryDropBtns = out.inventoryDropBtns as typeof this.inventoryDropBtns;
-    this.inventoryTradeBtns = out.inventoryTradeBtns as typeof this.inventoryTradeBtns;
-    this.inventoryPlaceBtns = out.inventoryPlaceBtns as typeof this.inventoryPlaceBtns;
-    this.inventoryUseBtns = out.inventoryUseBtns as typeof this.inventoryUseBtns;
+    this.inventoryDropBtns =
+      out.inventoryDropBtns as typeof this.inventoryDropBtns;
+    this.inventoryTradeBtns =
+      out.inventoryTradeBtns as typeof this.inventoryTradeBtns;
+    this.inventoryPlaceBtns =
+      out.inventoryPlaceBtns as typeof this.inventoryPlaceBtns;
+    this.inventoryUseBtns =
+      out.inventoryUseBtns as typeof this.inventoryUseBtns;
     this.tradeAcceptBtn = out.tradeAcceptBtn;
     this.tradeDeclineBtn = out.tradeDeclineBtn;
     this.tradeCancelBtn = out.tradeCancelBtn;
@@ -4041,20 +4367,31 @@ private preloadPlayerSprites() {
     if (this.lasso.active) return;
 
     const nearestEntity = this.nearestWanderingCow();
-    const nearestPos = nearestEntity !== null ? this.world.get(nearestEntity, EcsPosition) : null;
+    const nearestPos =
+      nearestEntity !== null
+        ? this.world.get(nearestEntity, EcsPosition)
+        : null;
     const atBase = this.isAtBase(),
       hasHerd = this.herdCows().length > 0;
     const atVendor = this.isAtVendor();
     let hint = "";
     const isMobile = W < 600;
     if (atVendor && !this.shopOpen)
-      hint = isMobile ? "Botão: Abrir Loja!" : "Pressione E / botão para abrir a LOJA!";
+      hint = isMobile
+        ? "Botão: Abrir Loja!"
+        : "Pressione E / botão para abrir a LOJA!";
     else if (atBase && hasHerd)
-      hint = isMobile ? "Botão: Depositar na base!" : "Pressione E / botão para DEPOSITAR na base!";
+      hint = isMobile
+        ? "Botão: Depositar na base!"
+        : "Pressione E / botão para DEPOSITAR na base!";
     else if (this.isBirthdayActive && this.isAtCake())
-      hint = isMobile ? "🎂 Botão: Interagir com o bolo!" : "🎂 Pressione E para interagir com o BOLO DE ANIVERSÁRIO!";
+      hint = isMobile
+        ? "🎂 Botão: Interagir com o bolo!"
+        : "🎂 Pressione E para interagir com o BOLO DE ANIVERSÁRIO!";
     else if (nearestPos && dist(this.player, nearestPos) <= CAPTURE_DIST)
-      hint = isMobile ? "Botão: Laçar vaca!" : "Pressione E / botão para LAÇAR a vaca!";
+      hint = isMobile
+        ? "Botão: Laçar vaca!"
+        : "Pressione E / botão para LAÇAR a vaca!";
 
     if (!hint) return;
 
@@ -4070,8 +4407,12 @@ private preloadPlayerSprites() {
   // ─── Bandido ──────────────────────────────────────────────────────────────
 
   private debugSpawnBandit() {
-    const basedEntry = this.world.query(EcsPosition, CowAI).find(([,, ai]) => ai.state === "based");
-    const wanderingEntry = this.world.query(EcsPosition, CowAI).find(([,, ai]) => ai.state === "wandering");
+    const basedEntry = this.world
+      .query(EcsPosition, CowAI)
+      .find(([, , ai]) => ai.state === "based");
+    const wanderingEntry = this.world
+      .query(EcsPosition, CowAI)
+      .find(([, , ai]) => ai.state === "wandering");
     const entry = basedEntry ?? wanderingEntry;
     if (!entry) {
       console.warn("[bandit] sem vaca alvo");
@@ -4089,16 +4430,26 @@ private preloadPlayerSprites() {
     banditAI.fleeCol = fleeCol;
     banditAI.fleeRow = fleeRow;
     banditAI.targetCowEntity = entry[0];
-    this.world.add(banditEntity, new EcsPosition(spawnCol, spawnRow)).add(banditEntity, banditAI);
+    this.world
+      .add(banditEntity, new EcsPosition(spawnCol, spawnRow))
+      .add(banditEntity, banditAI);
   }
 
   private spawnBandit() {
-    const basedEntries = this.world.query(EcsPosition, CowAI).filter(([,, ai]) => ai.state === "based");
-    const wanderingEntries = basedEntries.length > 0
-      ? basedEntries
-      : this.world.query(EcsPosition, CowAI).filter(([,, ai]) => ai.state === "wandering" || ai.state === "fleeing");
+    const basedEntries = this.world
+      .query(EcsPosition, CowAI)
+      .filter(([, , ai]) => ai.state === "based");
+    const wanderingEntries =
+      basedEntries.length > 0
+        ? basedEntries
+        : this.world
+            .query(EcsPosition, CowAI)
+            .filter(
+              ([, , ai]) => ai.state === "wandering" || ai.state === "fleeing",
+            );
     if (wanderingEntries.length === 0) return;
-    const targetEntry = wanderingEntries[Math.floor(Math.random() * wanderingEntries.length)]!;
+    const targetEntry =
+      wanderingEntries[Math.floor(Math.random() * wanderingEntries.length)]!;
     const target = this.cowCompat(targetEntry[0]);
 
     // Spawn at the map edge closest to the target cow
@@ -4122,7 +4473,9 @@ private preloadPlayerSprites() {
     banditAI.fleeCol = fleeCol;
     banditAI.fleeRow = fleeRow;
     banditAI.targetCowEntity = targetEntry[0];
-    this.world.add(banditEntity, new EcsPosition(spawn.col, spawn.row)).add(banditEntity, banditAI);
+    this.world
+      .add(banditEntity, new EcsPosition(spawn.col, spawn.row))
+      .add(banditEntity, banditAI);
   }
 
   private updateBandits(dt: number) {
@@ -4155,11 +4508,18 @@ private preloadPlayerSprites() {
     for (const [entity, pos, ai] of this.world.query(EcsPosition, BanditAI)) {
       if (ai.state === "approaching") {
         const cowEntity = ai.targetCowEntity;
-        const cowAI = cowEntity !== null ? this.world.get(cowEntity, CowAI) : null;
-        const cowPos = cowEntity !== null ? this.world.get(cowEntity, EcsPosition) : null;
+        const cowAI =
+          cowEntity !== null ? this.world.get(cowEntity, CowAI) : null;
+        const cowPos =
+          cowEntity !== null ? this.world.get(cowEntity, EcsPosition) : null;
 
-        if (!cowAI || !cowPos ||
-          (cowAI.state !== "wandering" && cowAI.state !== "fleeing" && cowAI.state !== "based")) {
+        if (
+          !cowAI ||
+          !cowPos ||
+          (cowAI.state !== "wandering" &&
+            cowAI.state !== "fleeing" &&
+            cowAI.state !== "based")
+        ) {
           ai.state = "scared";
           ai.targetCowEntity = null;
           ai.fleeCol = pos.col < MAP_COLS / 2 ? MAP_COLS - 2 : 1;
@@ -4185,7 +4545,8 @@ private preloadPlayerSprites() {
         const d = Math.sqrt(dx * dx + dy * dy);
         if (d < 2) {
           // Escapou — destrói o bandido e a vaca roubada
-          if (ai.targetCowEntity !== null) this.world.destroy(ai.targetCowEntity);
+          if (ai.targetCowEntity !== null)
+            this.world.destroy(ai.targetCowEntity);
           toDestroy.push(entity);
           continue;
         }
@@ -4195,13 +4556,19 @@ private preloadPlayerSprites() {
         // Arrasta a vaca junto
         if (ai.targetCowEntity !== null) {
           const cowPos = this.world.get(ai.targetCowEntity, EcsPosition);
-          if (cowPos) { cowPos.col = pos.col; cowPos.row = pos.row; }
+          if (cowPos) {
+            cowPos.col = pos.col;
+            cowPos.row = pos.row;
+          }
         }
       } else if (ai.state === "scared") {
         const dx = ai.fleeCol - pos.col;
         const dy = ai.fleeRow - pos.row;
         const d = Math.sqrt(dx * dx + dy * dy);
-        if (d < 2) { toDestroy.push(entity); continue; }
+        if (d < 2) {
+          toDestroy.push(entity);
+          continue;
+        }
         pos.col += (dx / d) * BANDIT_SCARED_SPEED * dt;
         pos.row += (dy / d) * BANDIT_SCARED_SPEED * dt;
       }
@@ -4210,8 +4577,10 @@ private preloadPlayerSprites() {
     for (const e of toDestroy) this.world.destroy(e);
 
     // Spawn timer
-    if (this.BANDIT_ACTIVE_PERIODS.includes(period) &&
-      this.world.query(BanditAI).length < 3) {
+    if (
+      this.BANDIT_ACTIVE_PERIODS.includes(period) &&
+      this.world.query(BanditAI).length < 3
+    ) {
       this.banditSpawnTimer -= dt;
       if (this.banditSpawnTimer <= 0) {
         this.spawnBandit();
@@ -4221,12 +4590,15 @@ private preloadPlayerSprites() {
   }
 
   private renderBandits() {
-    const bandits: BanditView[] = this.world.query(EcsPosition, BanditAI).map(([entity]) =>
-      this.banditCompat(entity) as BanditView,
-    );
-    const nearEntry = this.world.query(EcsPosition, BanditAI).find(([, pos, ai]) =>
-      ai.state === "fleeing" && dist(this.player, pos) <= 4.5,
-    );
+    const bandits: BanditView[] = this.world
+      .query(EcsPosition, BanditAI)
+      .map(([entity]) => this.banditCompat(entity) as BanditView);
+    const nearEntry = this.world
+      .query(EcsPosition, BanditAI)
+      .find(
+        ([, pos, ai]) =>
+          ai.state === "fleeing" && dist(this.player, pos) <= 4.5,
+      );
     const nearFleeingBanditScreen = nearEntry
       ? this.isoToScreen(nearEntry[1].col, nearEntry[1].row)
       : null;
@@ -4257,9 +4629,10 @@ private preloadPlayerSprites() {
 
   private renderMinigame() {
     const { lasso } = this;
-    const needed = (lasso.cowEntity !== null && this.world.isAlive(lasso.cowEntity))
-      ? this.world.must(lasso.cowEntity, CowTypeComp).cowType.clicksNeeded
-      : 15;
+    const needed =
+      lasso.cowEntity !== null && this.world.isAlive(lasso.cowEntity)
+        ? this.world.must(lasso.cowEntity, CowTypeComp).cowType.clicksNeeded
+        : 15;
     this.vendorRenderer.renderMinigame({
       ctx: this.ctx,
       canvas: this.canvas,
@@ -4272,7 +4645,8 @@ private preloadPlayerSprites() {
       },
       time: this.time,
       clicksNeeded: needed,
-      drawPixelBtn: (x, y, w, h, state, wide) => this.drawPixelBtn(x, y, w, h, state, wide),
+      drawPixelBtn: (x, y, w, h, state, wide) =>
+        this.drawPixelBtn(x, y, w, h, state, wide),
     });
   }
 
@@ -4319,7 +4693,6 @@ private preloadPlayerSprites() {
       itemIcons: this.itemIcons,
     });
   }
-
 
   // ─── Vendedor NPC ─────────────────────────────────────────────────────────
 
@@ -4404,14 +4777,24 @@ private preloadPlayerSprites() {
   private renderBenchHub() {
     const bench = this.activeBench!;
     const out = {
-      benchCraftBtns: [] as Array<{ id: string; x: number; y: number; w: number; h: number }>,
+      benchCraftBtns: [] as Array<{
+        id: string;
+        x: number;
+        y: number;
+        w: number;
+        h: number;
+      }>,
       benchHubCloseBtn: { x: 0, y: 0, r: 0 },
       benchPickupBtn: { x: 0, y: 0, w: 0, h: 0 },
     };
     this.benchHubRenderer.render({
       ctx: this.ctx,
       canvas: this.canvas,
-      bench: { type: bench.type, owner: bench.owner, ownerColor: bench.ownerColor },
+      bench: {
+        type: bench.type,
+        owner: bench.owner,
+        ownerColor: bench.ownerColor,
+      },
       isOwner: bench.owner === this.myName,
       stone: this.inventory.get("stone") ?? 0,
       coins: this.coins,
@@ -4451,7 +4834,8 @@ private preloadPlayerSprites() {
     });
     // Read back hitboxes
     this.shopSellButtons = out.shopSellButtons as typeof this.shopSellButtons;
-    this.shopSellBasedButtons = out.shopSellBasedButtons as typeof this.shopSellBasedButtons;
+    this.shopSellBasedButtons =
+      out.shopSellBasedButtons as typeof this.shopSellBasedButtons;
     this.shopTabBtns = out.shopTabBtns;
     this.shopCloseBtn = out.shopCloseBtn;
     this.shopBuyButtons = out.shopBuyButtons as typeof this.shopBuyButtons;

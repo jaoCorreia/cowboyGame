@@ -7,6 +7,13 @@ const mp = new MercadoPagoConfig({ accessToken: process.env.MP_ACCESS_TOKEN! });
 const MP_WEBHOOK_SECRET = process.env.MP_WEBHOOK_SECRET ?? "";
 const APP_URL = process.env.APP_URL ?? ""; // ex: https://seudominio.com
 
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID ?? "";
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET ?? "";
+const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID ?? "";
+const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET ?? "";
+const RESEND_API_KEY = process.env.RESEND_API_KEY ?? "";
+const EMAIL_FROM = process.env.EMAIL_FROM ?? "noreply@vaqueiro.up.railway.app";
+
 const MONGO_URI = process.env.MONGO_URI;
 if (!MONGO_URI) throw new Error("MONGO_URI environment variable is not set");
 const mongo = new MongoClient(MONGO_URI, {
@@ -51,19 +58,204 @@ await choppedTreesColl.createIndex({ col: 1, row: 1 }, { unique: true });
 
 const gameState = db.collection<{ _id: string; value: number }>("gameState");
 
+interface SessionDoc {
+  _id: string; // token
+  userId: string;
+  username: string;
+  color: string;
+  isAdmin: boolean;
+  expiresAt: Date;
+}
+const sessionsColl = db.collection<SessionDoc>("sessions");
+await sessionsColl.createIndex(
+  { expiresAt: 1 },
+  { expireAfterSeconds: 0 },
+);
+
+interface ChatMessageDoc {
+  _id: ObjectId;
+  playerId: string;
+  name: string;
+  color: string;
+  text: string;
+  sentAt: Date;
+}
+const chatMessages = db.collection<ChatMessageDoc>("chatMessages");
+await chatMessages.createIndex({ sentAt: 1 }, { expireAfterSeconds: 86400 }); // 24h TTL
+
 await users.createIndex(
   { username: 1 },
   { unique: true, collation: { locale: "en", strength: 2 } },
 );
+await users.createIndex({ email: 1 }, { unique: true, sparse: true });
+await users.createIndex({ googleId: 1 }, { unique: true, sparse: true });
+await users.createIndex({ githubId: 1 }, { unique: true, sparse: true });
 
-// Usernames that have admin privileges (case-insensitive)
-const ADMIN_USERNAMES = new Set(["admin", "joao"]);
+interface OAuthStateDoc {
+  _id: string; // state UUID
+  expiresAt: Date;
+}
+const oauthStatesColl = db.collection<OAuthStateDoc>("oauthStates");
+await oauthStatesColl.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 dias
+
+// Migração: garante que usuários admin já existentes têm isAdmin: true no DB
+await users.updateMany(
+  { username: { $in: ["admin", "joao"] }, isAdmin: { $ne: true } },
+  { $set: { isAdmin: true } },
+  { collation: { locale: "en", strength: 2 } },
+);
+
+async function getSession(token: string): Promise<Session | null> {
+  if (!token) return null;
+  const doc = await sessionsColl.findOne({ _id: token });
+  if (!doc) return null;
+  return { userId: doc.userId, username: doc.username, color: doc.color, isAdmin: doc.isAdmin };
+}
+
+async function createSession(token: string, sess: Session): Promise<void> {
+  await sessionsColl.replaceOne(
+    { _id: token },
+    { _id: token, ...sess, expiresAt: new Date(Date.now() + SESSION_TTL_MS) },
+    { upsert: true },
+  );
+}
+
+async function deleteSession(token: string): Promise<void> {
+  await sessionsColl.deleteOne({ _id: token });
+}
+
+async function deleteSessionsByUserId(userId: string): Promise<string[]> {
+  const docs = await sessionsColl.find({ userId }).toArray();
+  const tokens = docs.map((d) => d._id);
+  if (tokens.length > 0) await sessionsColl.deleteMany({ userId });
+  return tokens;
+}
+
+function buildUserPayload(user: UserDoc, token: string, isAdmin: boolean) {
+  return {
+    token,
+    username: user.username,
+    color: user.color,
+    basedCount: user.basedCount ?? 0,
+    discovered: user.discoveredTypes ?? [],
+    discoveredNPCs: user.discoveredNPCs ?? [],
+    capturedByType: user.capturedByType ?? {},
+    basedCows: user.basedCows ?? [],
+    coins: user.coins ?? 0,
+    inventory: user.inventory ?? {},
+    isAdmin,
+  };
+}
+
+async function loginUser(user: UserDoc): Promise<{ token: string; payload: ReturnType<typeof buildUserPayload> }> {
+  const userId = user._id.toString();
+  await deleteSessionsByUserId(userId);
+  const oldWs = activeWsByUserId.get(userId);
+  if (oldWs) {
+    try { oldWs.send(JSON.stringify({ type: "kicked" })); } catch { /**/ }
+    try { oldWs.close(); } catch { /**/ }
+  }
+  const token = crypto.randomUUID();
+  const isAdmin = user.isAdmin ?? false;
+  await createSession(token, { userId, username: user.username, color: user.color, isAdmin });
+  activeTokenByUserId.set(userId, token);
+  return { token, payload: buildUserPayload(user, token, isAdmin) };
+}
+
+/** Faz upsert de usuário OAuth. Retorna o documento atualizado/criado. */
+async function upsertOAuthUser(opts: {
+  provider: "google" | "github";
+  providerId: string;
+  email: string | null;
+  displayName: string;
+}): Promise<UserDoc> {
+  const providerKey = opts.provider === "google" ? "googleId" : "githubId";
+
+  // 1. Já tem conta vinculada a esse provider
+  let user = await users.findOne({ [providerKey]: opts.providerId }) as UserDoc | null;
+  if (user) return user;
+
+  // 2. Tem conta com mesmo email → vincula provider
+  if (opts.email) {
+    user = await users.findOne({ email: opts.email }) as UserDoc | null;
+    if (user) {
+      await users.updateOne({ _id: user._id }, { $set: { [providerKey]: opts.providerId } });
+      return { ...user, [providerKey]: opts.providerId };
+    }
+  }
+
+  // 3. Criar novo usuário — gerar username único
+  const base = (opts.displayName.replace(/\s+/g, "").slice(0, 18) || opts.email?.split("@")[0]?.slice(0, 18) || "Vaqueiro");
+  let username = base;
+  let suffix = 1;
+  while (await users.findOne({ username }, { collation: { locale: "en", strength: 2 } })) {
+    username = `${base}${suffix++}`;
+  }
+  const color = colorForUsername(username);
+  const result = await users.insertOne({
+    username,
+    password: null,
+    color,
+    ...(opts.email ? { email: opts.email, emailVerified: true } : {}),
+    [providerKey]: opts.providerId,
+    basedCount: 0,
+    discoveredTypes: [],
+    discoveredNPCs: [],
+    capturedByType: {},
+    basedCows: [],
+    coins: 0,
+    inventory: {},
+  } as unknown as Omit<UserDoc, "_id">);
+
+  return (await users.findOne({ _id: result.insertedId })) as UserDoc;
+}
+
+async function sendEmail(to: string, subject: string, html: string): Promise<void> {
+  if (!RESEND_API_KEY) {
+    console.warn(`[Email] RESEND_API_KEY não configurada — email não enviado para ${to}`);
+    return;
+  }
+  try {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${RESEND_API_KEY}` },
+      body: JSON.stringify({ from: EMAIL_FROM, to, subject, html }),
+    });
+    if (!res.ok) console.error("[Email] Resend error:", await res.text());
+  } catch (err) {
+    console.error("[Email] fetch error:", err);
+  }
+}
+
+async function sendMagicLink(email: string, rawToken: string, purpose: "login" | "verify"): Promise<void> {
+  const url = `${APP_URL}/auth/magic/${rawToken}`;
+  const label = purpose === "login" ? "Entrar no Vaqueiro" : "Confirmar email";
+  await sendEmail(
+    email,
+    purpose === "login" ? "🤠 Seu link de acesso — Vaqueiro" : "🤠 Confirme seu email — Vaqueiro",
+    `<div style="font-family:sans-serif;background:#1a0a02;color:#FFE0A0;padding:32px;text-align:center">
+      <h2 style="color:#FFD700">🤠 Jogo do Vaqueiro</h2>
+      <p style="margin:16px 0">${purpose === "login" ? "Clique no botão abaixo para entrar:" : "Clique para confirmar seu email:"}</p>
+      <a href="${url}" style="display:inline-block;padding:12px 28px;background:#9b6218;color:#FFD700;font-weight:bold;text-decoration:none;border:2px solid #e0a840;border-radius:4px">${label}</a>
+      <p style="margin-top:20px;font-size:12px;color:#9b7e57">Link válido por 15 minutos. Ignore se não foi você.</p>
+    </div>`,
+  );
+}
+
+/** Gera hash SHA-256 de uma string e retorna em hex. */
+async function sha256hex(input: string): Promise<string> {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
+}
 
 interface UserDoc {
   _id: ObjectId;
   username: string;
-  password: string;
+  password: string | null; // null para contas OAuth-only
   color: string;
+  isAdmin?: boolean;
   basedCount: number;
   discoveredTypes: string[];
   discoveredNPCs: string[];
@@ -71,6 +263,13 @@ interface UserDoc {
   basedCows: string[];
   coins: number;
   inventory: Record<string, number>;
+  // Campos de auth extendida
+  email?: string | null;
+  emailVerified?: boolean;
+  googleId?: string | null;
+  githubId?: string | null;
+  magicTokenHash?: string | null;
+  magicTokenExpires?: Date | null;
 }
 
 interface Session {
@@ -79,9 +278,8 @@ interface Session {
   color: string;
   isAdmin: boolean;
 }
-const sessions = new Map<string, Session>();
 
-const activeTokenByUserId = new Map<string, string>();
+const activeTokenByUserId = new Map<string, string>(); // userId → token ativo (memória)
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const activeWsByUserId = new Map<string, any>();
 
@@ -189,8 +387,8 @@ server = Bun.serve<WsData>({
 
       const newUserId = result.insertedId.toString();
       const token = crypto.randomUUID();
-      const isAdmin = ADMIN_USERNAMES.has(username.toLowerCase());
-      sessions.set(token, { userId: newUserId, username, color, isAdmin });
+      const isAdmin = false; // novos usuários nunca são admin
+      await createSession(token, { userId: newUserId, username, color, isAdmin });
       activeTokenByUserId.set(newUserId, token);
       return Response.json({
         token,
@@ -224,61 +422,23 @@ server = Bun.serve<WsData>({
         { username },
         { collation: { locale: "en", strength: 2 } },
       )) as UserDoc | null;
-      if (!row || !(await Bun.password.verify(password, row.password)))
+      if (!row || !row.password)
         return Response.json(
-          { error: "Usuário ou senha incorretos." },
+          { error: row ? "Conta criada via Google/GitHub — use o botão correspondente ou recupere a senha por email." : "Usuário ou senha incorretos." },
           { status: 401 },
         );
+      if (!(await Bun.password.verify(password, row.password)))
+        return Response.json({ error: "Usuário ou senha incorretos." }, { status: 401 });
 
-      const loginUserId = row._id.toString();
-      const oldToken = activeTokenByUserId.get(loginUserId);
-
-      if (oldToken) {
-        sessions.delete(oldToken);
-        const oldWs = activeWsByUserId.get(loginUserId);
-        if (oldWs) {
-          try {
-            oldWs.send(JSON.stringify({ type: "kicked" }));
-          } catch {
-            /* ignorar */
-          }
-          try {
-            oldWs.close();
-          } catch {
-            /* ignorar */
-          }
-        }
-      }
-
-      const token = crypto.randomUUID();
-      const isAdminLogin = ADMIN_USERNAMES.has(row.username.toLowerCase());
-      sessions.set(token, {
-        userId: loginUserId,
-        username: row.username,
-        color: row.color,
-        isAdmin: isAdminLogin,
-      });
-      activeTokenByUserId.set(loginUserId, token);
-      return Response.json({
-        token,
-        username: row.username,
-        color: row.color,
-        basedCount: row.basedCount ?? 0,
-        discovered: row.discoveredTypes ?? [],
-        discoveredNPCs: row.discoveredNPCs ?? [],
-        capturedByType: row.capturedByType ?? {},
-        basedCows: row.basedCows ?? [],
-        coins: row.coins ?? 0,
-        inventory: row.inventory ?? {},
-        isAdmin: isAdminLogin,
-      });
+      const { payload } = await loginUser(row);
+      return Response.json(payload);
     },
 
     "/auth/verify": async (req: Request) => {
       if (req.method !== "POST")
         return new Response("Method Not Allowed", { status: 405 });
       const { token } = (await req.json()) as { token?: string };
-      const sess = sessions.get(token ?? "");
+      const sess = await getSession(token ?? "");
       if (!sess)
         return Response.json({ error: "Sessão expirada." }, { status: 401 });
 
@@ -306,6 +466,217 @@ server = Bun.serve<WsData>({
       });
     },
 
+    // ── OAuth — Google ────────────────────────────────────────────────────────
+
+    "/auth/google": async (req: Request) => {
+      if (!GOOGLE_CLIENT_ID)
+        return new Response("Google OAuth não configurado.", { status: 501 });
+      const state = crypto.randomUUID();
+      await oauthStatesColl.insertOne({ _id: state, expiresAt: new Date(Date.now() + 10 * 60_000) });
+      const params = new URLSearchParams({
+        client_id: GOOGLE_CLIENT_ID,
+        redirect_uri: `${APP_URL}/auth/google/callback`,
+        response_type: "code",
+        scope: "openid email profile",
+        state,
+      });
+      return Response.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`, 302);
+    },
+
+    "/auth/google/callback": async (req: Request) => {
+      const url = new URL(req.url);
+      const code = url.searchParams.get("code");
+      const state = url.searchParams.get("state");
+      const errParam = url.searchParams.get("error");
+      if (errParam || !code || !state)
+        return Response.redirect(`${APP_URL}/?error=oauth_cancelled`, 302);
+
+      const stateDoc = await oauthStatesColl.findOneAndDelete({ _id: state });
+      if (!stateDoc)
+        return Response.redirect(`${APP_URL}/?error=oauth_state_invalid`, 302);
+
+      // Trocar code por tokens
+      const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          code,
+          client_id: GOOGLE_CLIENT_ID,
+          client_secret: GOOGLE_CLIENT_SECRET,
+          redirect_uri: `${APP_URL}/auth/google/callback`,
+          grant_type: "authorization_code",
+        }),
+      });
+      if (!tokenRes.ok)
+        return Response.redirect(`${APP_URL}/?error=oauth_token_failed`, 302);
+
+      const tokenData = (await tokenRes.json()) as { id_token?: string; error?: string };
+      if (!tokenData.id_token)
+        return Response.redirect(`${APP_URL}/?error=oauth_no_id_token`, 302);
+
+      // Decodificar JWT payload (sem verificar assinatura — confiar no HTTPS)
+      const jwtPayload = JSON.parse(
+        Buffer.from(tokenData.id_token.split(".")[1]!, "base64url").toString("utf8"),
+      ) as { sub: string; email?: string; name?: string };
+
+      const user = await upsertOAuthUser({
+        provider: "google",
+        providerId: jwtPayload.sub,
+        email: jwtPayload.email ?? null,
+        displayName: jwtPayload.name ?? jwtPayload.email ?? "Vaqueiro",
+      });
+
+      const { payload } = await loginUser(user);
+      return Response.redirect(`${APP_URL}/?session=${payload.token}`, 302);
+    },
+
+    // ── OAuth — GitHub ────────────────────────────────────────────────────────
+
+    "/auth/github": async (req: Request) => {
+      if (!GITHUB_CLIENT_ID)
+        return new Response("GitHub OAuth não configurado.", { status: 501 });
+      const state = crypto.randomUUID();
+      await oauthStatesColl.insertOne({ _id: state, expiresAt: new Date(Date.now() + 10 * 60_000) });
+      const params = new URLSearchParams({
+        client_id: GITHUB_CLIENT_ID,
+        redirect_uri: `${APP_URL}/auth/github/callback`,
+        scope: "read:user user:email",
+        state,
+      });
+      return Response.redirect(`https://github.com/login/oauth/authorize?${params}`, 302);
+    },
+
+    "/auth/github/callback": async (req: Request) => {
+      const url = new URL(req.url);
+      const code = url.searchParams.get("code");
+      const state = url.searchParams.get("state");
+      const errParam = url.searchParams.get("error");
+      if (errParam || !code || !state)
+        return Response.redirect(`${APP_URL}/?error=oauth_cancelled`, 302);
+
+      const stateDoc = await oauthStatesColl.findOneAndDelete({ _id: state });
+      if (!stateDoc)
+        return Response.redirect(`${APP_URL}/?error=oauth_state_invalid`, 302);
+
+      // Trocar code por access token
+      const tokenRes = await fetch("https://github.com/login/oauth/access_token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({
+          client_id: GITHUB_CLIENT_ID,
+          client_secret: GITHUB_CLIENT_SECRET,
+          code,
+          redirect_uri: `${APP_URL}/auth/github/callback`,
+        }),
+      });
+      if (!tokenRes.ok)
+        return Response.redirect(`${APP_URL}/?error=oauth_token_failed`, 302);
+
+      const tokenData = (await tokenRes.json()) as { access_token?: string; error?: string };
+      if (!tokenData.access_token)
+        return Response.redirect(`${APP_URL}/?error=oauth_no_access_token`, 302);
+
+      const ghHeaders = { Authorization: `Bearer ${tokenData.access_token}`, Accept: "application/json", "User-Agent": "CowboyGame/1.0" };
+
+      // Buscar perfil
+      const profileRes = await fetch("https://api.github.com/user", { headers: ghHeaders });
+      const profile = (await profileRes.json()) as { id: number; login: string; name?: string; email?: string };
+
+      // Email pode ser nulo → buscar lista de emails
+      let email = profile.email ?? null;
+      if (!email) {
+        const emailsRes = await fetch("https://api.github.com/user/emails", { headers: ghHeaders });
+        const emails = (await emailsRes.json()) as Array<{ email: string; primary: boolean; verified: boolean }>;
+        email = emails.find((e) => e.primary && e.verified)?.email ?? emails[0]?.email ?? null;
+      }
+
+      const user = await upsertOAuthUser({
+        provider: "github",
+        providerId: String(profile.id),
+        email,
+        displayName: profile.name ?? profile.login,
+      });
+
+      const { payload } = await loginUser(user);
+      return Response.redirect(`${APP_URL}/?session=${payload.token}`, 302);
+    },
+
+    // ── Magic Link / Recuperação de senha ─────────────────────────────────────
+
+    "/auth/forgot-password": async (req: Request) => {
+      if (req.method !== "POST")
+        return new Response("Method Not Allowed", { status: 405 });
+      const { email } = (await req.json()) as { email?: string };
+      if (!email || !email.includes("@"))
+        return Response.json({ error: "Email inválido." }, { status: 400 });
+
+      const user = await users.findOne({ email: email.toLowerCase() }) as UserDoc | null;
+      // Responde 200 mesmo se não encontrado (não revelar existência)
+      if (!user) return Response.json({ ok: true });
+
+      const rawToken = crypto.randomUUID();
+      const hash = await sha256hex(rawToken);
+      await users.updateOne({ _id: user._id }, {
+        $set: { magicTokenHash: hash, magicTokenExpires: new Date(Date.now() + 15 * 60_000) },
+      });
+
+      await sendMagicLink(email, rawToken, "login");
+      return Response.json({ ok: true });
+    },
+
+    "/auth/magic/:token": async (req: Request) => {
+      const rawToken = new URL(req.url).pathname.split("/").pop() ?? "";
+      if (!rawToken) return Response.redirect(`${APP_URL}/?error=link_invalido`, 302);
+
+      const hash = await sha256hex(rawToken);
+      const user = await users.findOne({
+        magicTokenHash: hash,
+        magicTokenExpires: { $gt: new Date() },
+      }) as UserDoc | null;
+
+      if (!user) return Response.redirect(`${APP_URL}/?error=link_expirado`, 302);
+
+      // Limpa o token de uso único
+      await users.updateOne({ _id: user._id }, {
+        $unset: { magicTokenHash: "", magicTokenExpires: "" },
+      });
+
+      const { payload } = await loginUser(user);
+      return Response.redirect(`${APP_URL}/?session=${payload.token}`, 302);
+    },
+
+    // ── Vincular email a conta existente ─────────────────────────────────────
+
+    "/auth/link-email": async (req: Request) => {
+      if (req.method !== "POST")
+        return new Response("Method Not Allowed", { status: 405 });
+      const { token, email } = (await req.json()) as { token?: string; email?: string };
+      const sess = await getSession(token ?? "");
+      if (!sess) return Response.json({ error: "Não autenticado." }, { status: 401 });
+      if (!email || !email.includes("@"))
+        return Response.json({ error: "Email inválido." }, { status: 400 });
+
+      const normalized = email.toLowerCase();
+      const existing = await users.findOne({ email: normalized }) as UserDoc | null;
+      if (existing && existing._id.toString() !== sess.userId)
+        return Response.json({ error: "Email já vinculado a outra conta." }, { status: 409 });
+
+      // Gerar magic link de confirmação
+      const rawToken = crypto.randomUUID();
+      const hash = await sha256hex(rawToken);
+      await users.updateOne({ _id: new ObjectId(sess.userId) }, {
+        $set: {
+          email: normalized,
+          emailVerified: false,
+          magicTokenHash: hash,
+          magicTokenExpires: new Date(Date.now() + 15 * 60_000),
+        },
+      });
+
+      await sendMagicLink(normalized, rawToken, "verify");
+      return Response.json({ ok: true });
+    },
+
     // ── Admin Commands ────────────────────────────────────────────────────────
 
     "/admin/cmd": async (req: Request) => {
@@ -318,7 +689,7 @@ server = Bun.serve<WsData>({
         amount?: number;
         text?: string;
       };
-      const sess = sessions.get(body.token ?? "");
+      const sess = await getSession(body.token ?? "");
       if (!sess || !sess.isAdmin)
         return Response.json({ error: "Forbidden" }, { status: 403 });
 
@@ -379,6 +750,23 @@ server = Bun.serve<WsData>({
         return Response.json({ ok: true });
       }
 
+      if (command === "set_admin") {
+        const { username, amount } = body;
+        if (!username)
+          return Response.json({ error: "username obrigatório" }, { status: 400 });
+        const grant = amount !== 0; // amount=1 → conceder, amount=0 → revogar
+        const result = await users.updateOne(
+          { username },
+          { $set: { isAdmin: grant } },
+          { collation: { locale: "en", strength: 2 } },
+        );
+        if (result.matchedCount === 0)
+          return Response.json({ error: "Usuário não encontrado" }, { status: 404 });
+        // Atualiza sessões ativas desse usuário no DB
+        await sessionsColl.updateMany({ username }, { $set: { isAdmin: grant } });
+        return Response.json({ ok: true, isAdmin: grant });
+      }
+
       return Response.json({ error: "Comando desconhecido" }, { status: 400 });
     },
 
@@ -388,7 +776,7 @@ server = Bun.serve<WsData>({
       if (req.method !== "GET")
         return new Response("Method Not Allowed", { status: 405 });
       const token = new URL(req.url).searchParams.get("token") ?? "";
-      const sess = sessions.get(token);
+      const sess = await getSession(token);
       if (!sess) return new Response("Unauthorized", { status: 401 });
 
       const objs = await placedObjects
@@ -421,7 +809,7 @@ server = Bun.serve<WsData>({
         col?: number;
         row?: number;
       };
-      const sess = sessions.get(body.token ?? "");
+      const sess = await getSession(body.token ?? "");
       if (!sess) return new Response("Unauthorized", { status: 401 });
 
       const validTypes = ["bancada_individual", "bancada_comunitaria"];
@@ -514,7 +902,7 @@ server = Bun.serve<WsData>({
       if (req.method !== "DELETE")
         return new Response("Method Not Allowed", { status: 405 });
       const token = new URL(req.url).searchParams.get("token") ?? "";
-      const sess = sessions.get(token);
+      const sess = await getSession(token);
       if (!sess) return new Response("Unauthorized", { status: 401 });
 
       const id = new URL(req.url).pathname.split("/").pop() ?? "";
@@ -551,7 +939,7 @@ server = Bun.serve<WsData>({
       if (req.method !== "POST")
         return new Response("Method Not Allowed", { status: 405 });
       const { token } = (await req.json()) as { token?: string };
-      const sess = sessions.get(token ?? "");
+      const sess = await getSession(token ?? "");
       if (!sess) return Response.json({ error: "Não autenticado." }, { status: 401 });
 
       const origin = req.headers.get("origin") ?? "http://localhost:9400";
@@ -667,7 +1055,7 @@ server = Bun.serve<WsData>({
         coins?: number;
         inventory?: Record<string, number>;
       };
-      const sess = sessions.get(body.token ?? "");
+      const sess = await getSession(body.token ?? "");
       if (!sess) return new Response("Unauthorized", { status: 401 });
 
       await users.updateOne(
@@ -713,9 +1101,9 @@ server = Bun.serve<WsData>({
 
     // ── WebSocket ─────────────────────────────────────────────────────────────
 
-    "/ws": (req: Request) => {
+    "/ws": async (req: Request) => {
       const token = new URL(req.url).searchParams.get("token") ?? "";
-      const sess = sessions.get(token);
+      const sess = await getSession(token);
       if (!sess)
         return new Response("Unauthorized — faça login primeiro.", {
           status: 401,
@@ -783,6 +1171,15 @@ server = Bun.serve<WsData>({
       // Check again after await
       if (activeWsByUserId.get(userId) !== ws) return;
 
+      const recentChat = await chatMessages
+        .find({})
+        .sort({ sentAt: 1 })
+        .limit(50)
+        .toArray();
+
+      // Check again after await
+      if (activeWsByUserId.get(userId) !== ws) return;
+
       ws.send(
         JSON.stringify({
           type: "init",
@@ -813,6 +1210,12 @@ server = Bun.serve<WsData>({
           })),
           choppedTrees: choppedTreeDocs.map((t) => ({ col: t.col, row: t.row })),
           birthdayParabensCount,
+          chatHistory: recentChat.map((m) => ({
+            id: m.playerId,
+            name: m.name,
+            color: m.color,
+            text: m.text,
+          })),
         }),
       );
 

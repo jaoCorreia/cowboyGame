@@ -67,7 +67,7 @@ export class ShopRenderer {
 
     const herd = view.herdCows;
     const based = view.basedCows;
-    const ROW_H = 52;
+    const ROW_H = 64;
     const SELL_MAX = 4; // max visible per section
     const PW = Math.min(W - 32, 390);
 
