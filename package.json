@@ -14,9 +14,7 @@
     "typescript": "^5"
   },
   "dependencies": {
-    "figlet": "^1.9.4",
     "mercadopago": "^2.12.0",
-    "mongodb": "^7.1.0",
-    "sharp": "^0.34.5"
+    "mongodb": "^7.1.0"
   }
 }

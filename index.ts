@@ -14,6 +14,101 @@ const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET ?? "";
 const RESEND_API_KEY = process.env.RESEND_API_KEY ?? "";
 const EMAIL_FROM = process.env.EMAIL_FROM ?? "noreply@vaqueiro.up.railway.app";
 
+const PORT = Number(process.env.PORT ?? 3200);
+const MAX_JSON_BODY_BYTES = 64 * 1024;
+const MAX_AVATAR_BODY_BYTES = 220 * 1024;
+const MAX_WS_MESSAGE_BYTES = 16 * 1024;
+const MAX_BASED_COWS = 20;
+const MAX_PROFILE_LIST_ITEMS = 200;
+const MAX_INVENTORY_ITEMS = 64;
+const MAX_PLACED_OBJECTS_PER_RESPONSE = 500;
+const MAX_CHOPPED_TREES_PER_RESPONSE = 6_400;
+const TREE_REGROW_BATCH_SIZE = 500;
+const ASSET_CACHE_HEADERS = {
+  "Cache-Control": "public, max-age=31536000, immutable",
+};
+
+async function readLimitedText(req: Request, maxBytes: number): Promise<string | Response> {
+  const rawLength = req.headers.get("content-length");
+  if (rawLength) {
+    const contentLength = Number(rawLength);
+    if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+      return Response.json({ error: "Payload muito grande." }, { status: 413 });
+    }
+  }
+
+  const reader = req.body?.getReader();
+  if (!reader) return "";
+
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      return Response.json({ error: "Payload muito grande." }, { status: 413 });
+    }
+    chunks.push(value);
+  }
+
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(body);
+}
+
+async function parseJsonBody<T>(
+  req: Request,
+  maxBytes = MAX_JSON_BODY_BYTES,
+): Promise<T | Response> {
+  const text = await readLimitedText(req, maxBytes);
+  if (text instanceof Response) return text;
+  try {
+    return JSON.parse(text || "{}") as T;
+  } catch {
+    return Response.json({ error: "JSON inválido." }, { status: 400 });
+  }
+}
+
+function clampStringArray(value: unknown, maxItems: number): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string").slice(0, maxItems)
+    : [];
+}
+
+function clampNumberRecord(value: unknown, maxItems: number): Record<string, number> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const out: Record<string, number> = {};
+  for (const [key, rawValue] of Object.entries(value).slice(0, maxItems)) {
+    if (key.length > 64) continue;
+    if (typeof rawValue !== "number" || !Number.isFinite(rawValue)) continue;
+    out[key] = Math.max(0, Math.floor(rawValue));
+  }
+  return out;
+}
+
+function clampNonNegativeInt(value: unknown, max = Number.MAX_SAFE_INTEGER): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.min(max, Math.floor(value))
+    : 0;
+}
+
+async function assetResponse(pathname: string): Promise<Response | null> {
+  if (pathname.includes("..") || pathname.includes("\\")) {
+    return new Response("Bad Request", { status: 400 });
+  }
+  const file = Bun.file("./public" + pathname);
+  if (!(await file.exists())) return null;
+  const headers = new Headers(ASSET_CACHE_HEADERS);
+  if (file.type) headers.set("Content-Type", file.type);
+  return new Response(file, { headers });
+}
+
 const MONGO_URI = process.env.MONGO_URI;
 if (!MONGO_URI) throw new Error("MONGO_URI environment variable is not set");
 const mongo = new MongoClient(MONGO_URI, {
@@ -55,6 +150,7 @@ interface ChoppedTreeDoc {
 }
 const choppedTreesColl = db.collection<ChoppedTreeDoc>("choppedTrees");
 await choppedTreesColl.createIndex({ col: 1, row: 1 }, { unique: true });
+await choppedTreesColl.createIndex({ choppedAt: 1 });
 
 const gameState = db.collection<{ _id: string; value: number }>("gameState");
 
@@ -71,6 +167,7 @@ await sessionsColl.createIndex(
   { expiresAt: 1 },
   { expireAfterSeconds: 0 },
 );
+await sessionsColl.createIndex({ userId: 1 });
 
 interface ChatMessageDoc {
   _id: ObjectId;
@@ -82,6 +179,8 @@ interface ChatMessageDoc {
 }
 const chatMessages = db.collection<ChatMessageDoc>("chatMessages");
 await chatMessages.createIndex({ sentAt: 1 }, { expireAfterSeconds: 86400 }); // 24h TTL
+await placedObjects.createIndex({ type: 1, owner: 1 });
+await placedObjects.createIndex({ col: 1, row: 1 });
 
 await users.createIndex(
   { username: 1 },
@@ -127,11 +226,8 @@ async function deleteSession(token: string): Promise<void> {
   await sessionsColl.deleteOne({ _id: token });
 }
 
-async function deleteSessionsByUserId(userId: string): Promise<string[]> {
-  const docs = await sessionsColl.find({ userId }).toArray();
-  const tokens = docs.map((d) => d._id);
-  if (tokens.length > 0) await sessionsColl.deleteMany({ userId });
-  return tokens;
+async function deleteSessionsByUserId(userId: string): Promise<void> {
+  await sessionsColl.deleteMany({ userId });
 }
 
 function buildUserPayload(user: UserDoc, token: string, isAdmin: boolean) {
@@ -143,7 +239,7 @@ function buildUserPayload(user: UserDoc, token: string, isAdmin: boolean) {
     discovered: user.discoveredTypes ?? [],
     discoveredNPCs: user.discoveredNPCs ?? [],
     capturedByType: user.capturedByType ?? {},
-    basedCows: user.basedCows ?? [],
+    basedCows: clampStringArray(user.basedCows, MAX_BASED_COWS),
     coins: user.coins ?? 0,
     inventory: user.inventory ?? {},
     isAdmin,
@@ -161,7 +257,6 @@ async function loginUser(user: UserDoc): Promise<{ token: string; payload: Retur
   const token = crypto.randomUUID();
   const isAdmin = user.isAdmin ?? false;
   await createSession(token, { userId, username: user.username, color: user.color, isAdmin });
-  activeTokenByUserId.set(userId, token);
   return { token, payload: buildUserPayload(user, token, isAdmin) };
 }
 
@@ -295,7 +390,6 @@ interface Session {
   isAdmin: boolean;
 }
 
-const activeTokenByUserId = new Map<string, string>(); // userId → token ativo (memória)
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const activeWsByUserId = new Map<string, any>();
 
@@ -361,7 +455,7 @@ interface WsData {
 let server!: ReturnType<typeof Bun.serve<WsData>>;
 
 server = Bun.serve<WsData>({
-  port: 3200,
+  port: PORT,
 
   routes: {
     // ── Auth ─────────────────────────────────────────────────────────────────
@@ -369,10 +463,9 @@ server = Bun.serve<WsData>({
     "/auth/register": async (req: Request) => {
       if (req.method !== "POST")
         return new Response("Method Not Allowed", { status: 405 });
-      const { username, password } = (await req.json()) as {
-        username?: string;
-        password?: string;
-      };
+      const body = await parseJsonBody<{ username?: string; password?: string }>(req, 8 * 1024);
+      if (body instanceof Response) return body;
+      const { username, password } = body;
       if (!username || !password || username.length < 2 || password.length < 4)
         return Response.json(
           { error: "Usuário (mín. 2) e senha (mín. 4) obrigatórios." },
@@ -405,7 +498,6 @@ server = Bun.serve<WsData>({
       const token = crypto.randomUUID();
       const isAdmin = false; // novos usuários nunca são admin
       await createSession(token, { userId: newUserId, username, color, isAdmin });
-      activeTokenByUserId.set(newUserId, token);
       return Response.json({
         token,
         username,
@@ -424,10 +516,9 @@ server = Bun.serve<WsData>({
     "/auth/login": async (req: Request) => {
       if (req.method !== "POST")
         return new Response("Method Not Allowed", { status: 405 });
-      const { username, password } = (await req.json()) as {
-        username?: string;
-        password?: string;
-      };
+      const body = await parseJsonBody<{ username?: string; password?: string }>(req, 8 * 1024);
+      if (body instanceof Response) return body;
+      const { username, password } = body;
       if (!username || !password)
         return Response.json(
           { error: "Preencha usuário e senha." },
@@ -453,7 +544,9 @@ server = Bun.serve<WsData>({
     "/auth/verify": async (req: Request) => {
       if (req.method !== "POST")
         return new Response("Method Not Allowed", { status: 405 });
-      const { token } = (await req.json()) as { token?: string };
+      const body = await parseJsonBody<{ token?: string }>(req, 8 * 1024);
+      if (body instanceof Response) return body;
+      const { token } = body;
       const sess = await getSession(token ?? "");
       if (!sess)
         return Response.json({ error: "Sessão expirada." }, { status: 401 });
@@ -475,7 +568,7 @@ server = Bun.serve<WsData>({
         discovered: row.discoveredTypes ?? [],
         discoveredNPCs: row.discoveredNPCs ?? [],
         capturedByType: row.capturedByType ?? {},
-        basedCows: row.basedCows ?? [],
+        basedCows: clampStringArray(row.basedCows, MAX_BASED_COWS),
         coins: row.coins ?? 0,
         inventory: row.inventory ?? {},
         isAdmin: sess.isAdmin,
@@ -650,7 +743,9 @@ server = Bun.serve<WsData>({
     "/auth/forgot-password": async (req: Request) => {
       if (req.method !== "POST")
         return new Response("Method Not Allowed", { status: 405 });
-      const { email } = (await req.json()) as { email?: string };
+      const body = await parseJsonBody<{ email?: string }>(req, 8 * 1024);
+      if (body instanceof Response) return body;
+      const { email } = body;
       if (!email || !email.includes("@"))
         return Response.json({ error: "Email inválido." }, { status: 400 });
 
@@ -694,7 +789,9 @@ server = Bun.serve<WsData>({
     "/auth/link-email": async (req: Request) => {
       if (req.method !== "POST")
         return new Response("Method Not Allowed", { status: 405 });
-      const { token, email } = (await req.json()) as { token?: string; email?: string };
+      const body = await parseJsonBody<{ token?: string; email?: string }>(req, 16 * 1024);
+      if (body instanceof Response) return body;
+      const { token, email } = body;
       const sess = await getSession(token ?? "");
       if (!sess) return Response.json({ error: "Não autenticado." }, { status: 401 });
       if (!email || !email.includes("@"))
@@ -745,7 +842,9 @@ server = Bun.serve<WsData>({
     "/auth/avatar": async (req: Request) => {
       if (req.method !== "POST")
         return new Response("Method Not Allowed", { status: 405 });
-      const { token, dataUrl } = (await req.json()) as { token?: string; dataUrl?: string };
+      const body = await parseJsonBody<{ token?: string; dataUrl?: string }>(req, MAX_AVATAR_BODY_BYTES);
+      if (body instanceof Response) return body;
+      const { token, dataUrl } = body;
       const sess = await getSession(token ?? "");
       if (!sess) return Response.json({ error: "Não autenticado." }, { status: 401 });
       if (!dataUrl || !dataUrl.startsWith("data:image/"))
@@ -764,9 +863,11 @@ server = Bun.serve<WsData>({
     "/auth/change-password": async (req: Request) => {
       if (req.method !== "POST")
         return new Response("Method Not Allowed", { status: 405 });
-      const { token, currentPassword, newPassword } = (await req.json()) as {
+      const body = await parseJsonBody<{
         token?: string; currentPassword?: string; newPassword?: string;
-      };
+      }>(req, 16 * 1024);
+      if (body instanceof Response) return body;
+      const { token, currentPassword, newPassword } = body;
       const sess = await getSession(token ?? "");
       if (!sess) return Response.json({ error: "Não autenticado." }, { status: 401 });
       if (!newPassword || newPassword.length < 4)
@@ -793,7 +894,9 @@ server = Bun.serve<WsData>({
     "/auth/unlink-provider": async (req: Request) => {
       if (req.method !== "POST")
         return new Response("Method Not Allowed", { status: 405 });
-      const { token, provider } = (await req.json()) as { token?: string; provider?: string };
+      const body = await parseJsonBody<{ token?: string; provider?: string }>(req, 8 * 1024);
+      if (body instanceof Response) return body;
+      const { token, provider } = body;
       const sess = await getSession(token ?? "");
       if (!sess) return Response.json({ error: "Não autenticado." }, { status: 401 });
       if (provider !== "google" && provider !== "github")
@@ -817,13 +920,14 @@ server = Bun.serve<WsData>({
     "/admin/cmd": async (req: Request) => {
       if (req.method !== "POST")
         return new Response("Method Not Allowed", { status: 405 });
-      const body = (await req.json()) as {
+      const body = await parseJsonBody<{
         token?: string;
         command?: string;
         username?: string;
         amount?: number;
         text?: string;
-      };
+      }>(req, 16 * 1024);
+      if (body instanceof Response) return body;
       const sess = await getSession(body.token ?? "");
       if (!sess || !sess.isAdmin)
         return Response.json({ error: "Forbidden" }, { status: 403 });
@@ -921,6 +1025,7 @@ server = Bun.serve<WsData>({
             { type: "bancada_individual", owner: sess.username },
           ],
         })
+        .limit(MAX_PLACED_OBJECTS_PER_RESPONSE)
         .toArray();
 
       return Response.json(
@@ -938,12 +1043,13 @@ server = Bun.serve<WsData>({
     "/objects/place": async (req: Request) => {
       if (req.method !== "POST")
         return new Response("Method Not Allowed", { status: 405 });
-      const body = (await req.json()) as {
+      const body = await parseJsonBody<{
         token?: string;
         type?: string;
         col?: number;
         row?: number;
-      };
+      }>(req, 16 * 1024);
+      if (body instanceof Response) return body;
       const sess = await getSession(body.token ?? "");
       if (!sess) return new Response("Unauthorized", { status: 401 });
 
@@ -1073,7 +1179,9 @@ server = Bun.serve<WsData>({
     "/mp/checkout": async (req: Request) => {
       if (req.method !== "POST")
         return new Response("Method Not Allowed", { status: 405 });
-      const { token } = (await req.json()) as { token?: string };
+      const body = await parseJsonBody<{ token?: string }>(req, 8 * 1024);
+      if (body instanceof Response) return body;
+      const { token } = body;
       const sess = await getSession(token ?? "");
       if (!sess) return Response.json({ error: "Não autenticado." }, { status: 401 });
 
@@ -1114,7 +1222,8 @@ server = Bun.serve<WsData>({
       if (req.method !== "POST")
         return new Response("Method Not Allowed", { status: 405 });
 
-      const rawBody = await req.text();
+      const rawBody = await readLimitedText(req, 64 * 1024);
+      if (rawBody instanceof Response) return rawBody;
       let body: { type?: string; action?: string; data?: { id?: string } };
       try {
         body = JSON.parse(rawBody) as typeof body;
@@ -1180,7 +1289,7 @@ server = Bun.serve<WsData>({
     "/auth/save": async (req: Request) => {
       if (req.method !== "POST")
         return new Response("Method Not Allowed", { status: 405 });
-      const body = (await req.json()) as {
+      const body = await parseJsonBody<{
         token?: string;
         basedCount?: number;
         discovered?: string[];
@@ -1189,7 +1298,8 @@ server = Bun.serve<WsData>({
         basedCowTypes?: string[];
         coins?: number;
         inventory?: Record<string, number>;
-      };
+      }>(req, 32 * 1024);
+      if (body instanceof Response) return body;
       const sess = await getSession(body.token ?? "");
       if (!sess) return new Response("Unauthorized", { status: 401 });
 
@@ -1197,21 +1307,13 @@ server = Bun.serve<WsData>({
         { _id: new ObjectId(sess.userId) },
         {
           $set: {
-            basedCount: body.basedCount ?? 0,
-            discoveredTypes: body.discovered ?? [],
-            discoveredNPCs: body.discoveredNPCs ?? [],
-            capturedByType: body.capturedByType ?? {},
-            basedCows: Array.isArray(body.basedCowTypes)
-              ? body.basedCowTypes
-              : [],
-            coins:
-              typeof body.coins === "number" && body.coins >= 0
-                ? Math.floor(body.coins)
-                : 0,
-            inventory:
-              body.inventory && typeof body.inventory === "object"
-                ? body.inventory
-                : {},
+            basedCount: clampNonNegativeInt(body.basedCount, MAX_BASED_COWS),
+            discoveredTypes: clampStringArray(body.discovered, MAX_PROFILE_LIST_ITEMS),
+            discoveredNPCs: clampStringArray(body.discoveredNPCs, MAX_PROFILE_LIST_ITEMS),
+            capturedByType: clampNumberRecord(body.capturedByType, MAX_PROFILE_LIST_ITEMS),
+            basedCows: clampStringArray(body.basedCowTypes, MAX_BASED_COWS),
+            coins: clampNonNegativeInt(body.coins),
+            inventory: clampNumberRecord(body.inventory, MAX_INVENTORY_ITEMS),
           },
         },
       );
@@ -1222,15 +1324,15 @@ server = Bun.serve<WsData>({
 
     "/sprites/*": async (req: Request) => {
       const url = new URL(req.url);
-      const file = Bun.file("./public" + url.pathname);
-      if (await file.exists()) return new Response(file);
+      const response = await assetResponse(url.pathname);
+      if (response) return response;
       return new Response("Not Found", { status: 404 });
     },
 
     "/sounds/*": async (req: Request) => {
       const url = new URL(req.url);
-      const file = Bun.file("./public" + url.pathname);
-      if (await file.exists()) return new Response(file);
+      const response = await assetResponse(url.pathname);
+      if (response) return response;
       return new Response("Not Found", { status: 404 });
     },
 
@@ -1252,6 +1354,8 @@ server = Bun.serve<WsData>({
   },
 
   websocket: {
+    idleTimeout: 120,
+    maxPayloadLength: MAX_WS_MESSAGE_BYTES,
     async open(ws) {
       const { id, username, color, userId } = ws.data;
 
@@ -1287,12 +1391,13 @@ server = Bun.serve<WsData>({
       // Se outro refresh chegou durante o await, abortar
       if (activeWsByUserId.get(userId) !== ws) return;
 
-      const savedTypeIds: string[] = row?.basedCows ?? [];
+      const savedTypeIds = clampStringArray(row?.basedCows, MAX_BASED_COWS);
       const savedBasedPositions = savedTypeIds.map((_, i) => userSlotToPos(i));
 
       // Carrega bancadas comunitárias existentes para enviar ao novo jogador
       const communityBenches = await placedObjects
         .find({ type: "bancada_comunitaria" })
+        .limit(MAX_PLACED_OBJECTS_PER_RESPONSE)
         .toArray();
 
       // Verificar novamente após segundo await
@@ -1301,6 +1406,7 @@ server = Bun.serve<WsData>({
       const choppedTreeDocs = await choppedTreesColl
         .find({})
         .project({ col: 1, row: 1, choppedAt: 1 })
+        .limit(MAX_CHOPPED_TREES_PER_RESPONSE)
         .toArray();
 
       // Check again after await
@@ -1392,8 +1498,9 @@ server = Bun.serve<WsData>({
       const { id, userId } = ws.data;
       const player = players.get(id);
       if (!player) return;
+      if (typeof msg !== "string" || msg.length > MAX_WS_MESSAGE_BYTES) return;
       try {
-        const u = JSON.parse(msg as string);
+        const u = JSON.parse(msg);
 
         if (u.type === "move") {
           player.col = u.col;
@@ -1419,9 +1526,11 @@ server = Bun.serve<WsData>({
             }),
           );
         } else if (u.type === "cow_based" && Array.isArray(u.typeIds)) {
+          const freeSlots = Math.max(0, MAX_BASED_COWS - player.basedCows.length);
+          if (freeSlots === 0) return;
           const typeIds = (u.typeIds as unknown[])
             .filter((t): t is string => typeof t === "string")
-            .slice(0, 20);
+            .slice(0, freeSlots);
           if (typeIds.length === 0) return;
           const startSlot = player.basedCows.length;
           const newPositions = typeIds.map((_, i) =>
@@ -1441,21 +1550,13 @@ server = Bun.serve<WsData>({
             { _id: new ObjectId(userId) },
             {
               $set: {
-                basedCount: u.basedCount ?? 0,
-                discoveredTypes: u.discovered ?? [],
-                discoveredNPCs: u.discoveredNPCs ?? [],
-                capturedByType: u.capturedByType ?? {},
-                basedCows: Array.isArray(u.basedCowTypes)
-                  ? u.basedCowTypes
-                  : [],
-                coins:
-                  typeof u.coins === "number" && u.coins >= 0
-                    ? Math.floor(u.coins)
-                    : 0,
-                inventory:
-                  u.inventory && typeof u.inventory === "object"
-                    ? u.inventory
-                    : {},
+                basedCount: clampNonNegativeInt(u.basedCount, MAX_BASED_COWS),
+                discoveredTypes: clampStringArray(u.discovered, MAX_PROFILE_LIST_ITEMS),
+                discoveredNPCs: clampStringArray(u.discoveredNPCs, MAX_PROFILE_LIST_ITEMS),
+                capturedByType: clampNumberRecord(u.capturedByType, MAX_PROFILE_LIST_ITEMS),
+                basedCows: clampStringArray(u.basedCowTypes, MAX_BASED_COWS),
+                coins: clampNonNegativeInt(u.coins),
+                inventory: clampNumberRecord(u.inventory, MAX_INVENTORY_ITEMS),
               },
             },
           );
@@ -1561,9 +1662,11 @@ setInterval(async () => {
   const cutoff = new Date(Date.now() - 60 * 60 * 1000); // 1 hour ago
   const expired = await choppedTreesColl
     .find({ choppedAt: { $lt: cutoff } })
+    .project({ col: 1, row: 1 })
+    .limit(TREE_REGROW_BATCH_SIZE)
     .toArray();
   if (expired.length === 0) return;
-  await choppedTreesColl.deleteMany({ choppedAt: { $lt: cutoff } });
+  await choppedTreesColl.deleteMany({ _id: { $in: expired.map((tree) => tree._id) } });
   for (const tree of expired) {
     server.publish(
       "game",

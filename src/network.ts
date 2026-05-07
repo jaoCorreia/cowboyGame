@@ -193,6 +193,17 @@ export class Network {
     };
   }
 
+  disconnect() {
+    this.ready = false;
+    if (!this.ws) return;
+    this.ws.onopen = null;
+    this.ws.onmessage = null;
+    this.ws.onclose = null;
+    this.ws.onerror = null;
+    this.ws.close();
+    this.ws = null;
+  }
+
   sendMove(
     col: number,
     row: number,
