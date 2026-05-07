@@ -3402,7 +3402,12 @@ export class Game {
       const drop =
         WOOD_DROP_MIN +
         Math.floor(Math.random() * (WOOD_DROP_MAX - WOOD_DROP_MIN + 1));
-      this.addResource("wood", drop, WOOD_MAX_STACK);
+      const gained = this.addResource("wood", drop, WOOD_MAX_STACK);
+      if (gained <= 0) {
+        this.chop.active = false;
+        this.addSystemMessage("Mochila cheia: libere espaço antes de cortar a árvore.");
+        return;
+      }
       const { col, row } = this.chop;
       this.map[row]![col]!.decoration = "none";
       this.choppedTrees.set(`${col},${row}`, 0);

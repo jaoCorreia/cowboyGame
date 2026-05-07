@@ -2,6 +2,7 @@ import { MongoClient, ObjectId } from "mongodb";
 import { checkServerIdentity as tlsCheckServerIdentity } from "tls";
 import { MercadoPagoConfig, Preference, Payment } from "mercadopago";
 import index from "./index.html";
+import { MAP_COLS, MAP_ROWS, TREE_REGROW_TIME } from "./src/constants";
 
 const mp = new MercadoPagoConfig({ accessToken: process.env.MP_ACCESS_TOKEN! });
 const MP_WEBHOOK_SECRET = process.env.MP_WEBHOOK_SECRET ?? "";
@@ -1567,7 +1568,7 @@ server = Bun.serve<WsData>({
         ) {
           const col = Math.floor(u.col);
           const row = Math.floor(u.row);
-          if (col < 0 || row < 0 || col >= 80 || row >= 80) return;
+          if (col < 0 || row < 0 || col >= MAP_COLS || row >= MAP_ROWS) return;
           try {
             await choppedTreesColl.insertOne({
               col,
@@ -1657,9 +1658,9 @@ server = Bun.serve<WsData>({
   },
 });
 
-// Regrow trees every minute: remove chopped trees older than 1 hour
+// Regrow trees on the same cadence advertised by the client gameplay constants.
 setInterval(async () => {
-  const cutoff = new Date(Date.now() - 60 * 60 * 1000); // 1 hour ago
+  const cutoff = new Date(Date.now() - TREE_REGROW_TIME * 1000);
   const expired = await choppedTreesColl
     .find({ choppedAt: { $lt: cutoff } })
     .project({ col: 1, row: 1 })
@@ -1673,6 +1674,6 @@ setInterval(async () => {
       JSON.stringify({ type: "tree_regrow", col: tree.col, row: tree.row }),
     );
   }
-}, 60_000);
+}, 5_000);
 
 console.log(`🤠 Cowboy Game rodando em ${server.url}`);
