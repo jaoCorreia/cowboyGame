@@ -524,7 +524,27 @@ export class Game {
 
     for (const [entity] of this.world.query(EcsPosition, RemotePlayerData, NetworkId)) {
       const r = this.remotePlayerCompat(entity);
+      const hN = Math.min(r.herdCount ?? 0, 12);
+      for (let i = 0; i < hN; i++) {
+        const tCol = r.col - r.dirCol * (i + 1) * 1.1;
+        const tRow = r.row - r.dirRow * (i + 1) * 1.1;
+        const alpha = Math.max(0.45, 0.9 - i * 0.07);
+        const herdbob = r.moving ? Math.sin(this.gameTime * 9 + i * 1.4) * 1.5 : 0;
+        items.push({
+          depth: tCol + tRow,
+          draw: () => this.drawRemoteBasedCow(tCol, tRow, r.color, alpha, herdbob),
+        });
+      }
       items.push({ depth: r.col + r.row, draw: () => this.drawRemotePlayer(r) });
+    }
+
+    for (const [, batch] of this.remoteCowsInBase) {
+      for (const pos of batch.cows) {
+        items.push({
+          depth: pos.col + pos.row - 100,
+          draw: () => this.drawRemoteBasedCow(pos.col, pos.row, batch.color),
+        });
+      }
     }
 
     for (const obj of this.placedObjects) {
@@ -559,10 +579,31 @@ export class Game {
     });
   }
 
+  private drawRemoteBasedCow(col: number, row: number, color: string, baseAlpha?: number, bob?: number) {
+    this.cowRenderer.drawRemoteBasedCow({
+      ctx: this.ctx,
+      col,
+      row,
+      color,
+      baseAlpha,
+      bob,
+      isoToScreen: (c: number, r: number) => this.isoToScreen(c, r),
+    });
+  }
+
   private isoToScreen(col: number, row: number) {
     return {
       x: (col - row) * (TILE_W / 2) + this.camX,
       y: (col + row) * (TILE_H / 2) + this.camY,
+    };
+  }
+
+  screenToIso(x: number, y: number) {
+    const wx = x - this.camX;
+    const wy = y - this.camY;
+    return {
+      col: wx / TILE_W + wy / TILE_H,
+      row: -wx / TILE_W + wy / TILE_H,
     };
   }
 

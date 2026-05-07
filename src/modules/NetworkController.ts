@@ -1,4 +1,5 @@
 import { Network, type RemotePlayer, type ChatMessage } from "../network";
+import { RemotePlayerData } from "../components";
 
 export class NetworkController {
   private network?: Network;
@@ -22,6 +23,13 @@ export class NetworkController {
         if (entity !== undefined) {
           const pos = this.game.worldState.get(entity, this.game.ecsPosition);
           if (pos) { pos.col = u.col; pos.row = u.row; }
+          const data = this.game.worldState.get(entity, RemotePlayerData);
+          if (data) {
+            data.dirCol = u.dirCol;
+            data.dirRow = u.dirRow;
+            data.moving = u.moving;
+            data.herdCount = u.herdCount;
+          }
         }
       },
       onLeave: (id: string) => {

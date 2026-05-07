@@ -1,4 +1,5 @@
 import { MAP_COLS, MAP_ROWS, PLAYER_SPEED, CAPTURE_DIST } from "../constants";
+import { sprites } from "../sprites";
 
 export class PlayerController {
   public col: number;
@@ -147,9 +148,18 @@ export class PlayerController {
       spritePath = `player/idle/${dir}.png`;
     }
 
-    const img = game.sprites?.get(spritePath);
+    const img = sprites.get(spritePath);
     if (img) {
       ctx.drawImage(img, x - SW / 2, y - SH + 12, SW, SH);
+    } else {
+      ctx.fillStyle = this.game.myColor ?? "#3a5a9f";
+      ctx.fillRect(x - 9, y - 26, 18, 20);
+      ctx.fillStyle = "#f4c28a";
+      ctx.fillRect(x - 7, y - 38, 14, 14);
+      ctx.fillStyle = "#5c3010";
+      ctx.fillRect(x - 10, y - 54, 20, 18);
+      ctx.fillStyle = "#3a1a00";
+      ctx.fillRect(x - 12, y - 38, 24, 4);
     }
   }
 }
